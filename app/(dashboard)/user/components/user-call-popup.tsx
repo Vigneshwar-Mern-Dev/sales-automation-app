@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 
 type LiveCall = {
@@ -44,27 +44,50 @@ export function UserCallPopup() {
   const [calls, setCalls] = useState<LiveCall[]>([]);
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(() => new Set());
   const [now, setNow] = useState(() => Date.now());
+  const serverOffsetMs = useRef(0);
 
   useEffect(() => {
     let isMounted = true;
+    let isLoading = false;
+    const controller = new AbortController();
 
     async function loadLiveCalls() {
+      if (isLoading) return;
+      isLoading = true;
+
       try {
-        const response = await fetch("/api/user/calls/live", { cache: "no-store" });
+        const response = await fetch("/api/user/calls/live", {
+          cache: "no-store",
+          signal: controller.signal,
+        });
         if (!response.ok) return;
-        const payload = (await response.json()) as { calls?: LiveCall[] };
-        if (isMounted) setCalls(payload.calls || []);
-      } catch {
+        const payload = (await response.json()) as { calls?: LiveCall[]; serverTime?: string };
+        if (isMounted) {
+          const nextCalls = payload.calls || [];
+          const serverTime = payload.serverTime ? new Date(payload.serverTime).getTime() : Number.NaN;
+          if (!Number.isNaN(serverTime)) {
+            serverOffsetMs.current = serverTime - Date.now();
+            setNow(serverTime);
+          }
+          setCalls(nextCalls);
+          const activeIds = new Set(nextCalls.map((call) => call.id));
+          setDismissedIds((current) => new Set([...current].filter((id) => activeIds.has(id))));
+        }
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
         // Keep polling quiet; a popup should never break the workspace.
+      } finally {
+        isLoading = false;
       }
     }
 
     loadLiveCalls();
     const intervalId = window.setInterval(loadLiveCalls, 4000);
-    const clockId = window.setInterval(() => setNow(Date.now()), 1000);
+    const clockId = window.setInterval(() => setNow(Date.now() + serverOffsetMs.current), 1000);
 
     return () => {
       isMounted = false;
+      controller.abort();
       window.clearInterval(intervalId);
       window.clearInterval(clockId);
     };
@@ -81,9 +104,6 @@ export function UserCallPopup() {
   const isOutgoing = visibleCall.callDirection === "OUTGOING";
   const newLead = isNewLead(visibleCall, now);
   const ringAgeSeconds = Math.max(0, Math.floor((now - new Date(visibleCall.firstRingAt).getTime()) / 1000));
-  const ringSecondsLeft = Math.max(0, 30 - ringAgeSeconds);
-
-  if (isRinging && ringAgeSeconds >= 30) return null;
 
   return (
     <div className="fixed bottom-5 right-5 z-[60] w-[min(calc(100vw-2.5rem),400px)] rounded-lg border border-[var(--user-accent-border)] bg-[#0d1118] p-4 shadow-2xl">
@@ -124,7 +144,7 @@ export function UserCallPopup() {
           <p className="text-zinc-500">Started</p>
           <p className="mt-1 font-semibold text-zinc-200">{formatTime(visibleCall.firstRingAt)}</p>
           <p className="mt-1 text-zinc-500">
-            {isRinging ? `${ringSecondsLeft}s before open lead queue` : "On call"}
+            {isRinging ? `${ringAgeSeconds}s ringing` : "On call"}
           </p>
         </div>
         <div>

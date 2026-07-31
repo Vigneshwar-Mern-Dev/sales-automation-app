@@ -12,6 +12,7 @@ const sessionDurationMs = 1000 * 60 * 60 * 24 * 7;
 type SessionPayload = {
   userId: string;
   role: Role;
+  sessionVersion: number;
   expiresAt: number;
 };
 
@@ -57,11 +58,16 @@ function isValidSignature(signature: string, expectedSignature: string) {
   );
 }
 
-export async function createSession(user: { id: string; role: Role }) {
+export async function createSession(user: {
+  id: string;
+  role: Role;
+  sessionVersion: number;
+}) {
   const expiresAt = Date.now() + sessionDurationMs;
   const payload: SessionPayload = {
     userId: user.id,
     role: user.role,
+    sessionVersion: user.sessionVersion,
     expiresAt,
   };
   const encodedPayload = toBase64Url(JSON.stringify(payload));
@@ -70,7 +76,7 @@ export async function createSession(user: { id: string; role: Role }) {
   (await cookies()).set(sessionCookieName, `${encodedPayload}.${signature}`, {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production" && process.env.NEXT_PUBLIC_CRM_URL?.startsWith("https"),
+    secure: process.env.NODE_ENV === "production",
     path: "/",
     expires: new Date(expiresAt),
   });
@@ -102,7 +108,12 @@ export async function readSession() {
   try {
     const payload = JSON.parse(fromBase64Url(encodedPayload)) as SessionPayload;
 
-    if (!payload.userId || payload.expiresAt < Date.now()) {
+    if (
+      !payload.userId ||
+      !Number.isInteger(payload.sessionVersion) ||
+      payload.sessionVersion < 1 ||
+      payload.expiresAt < Date.now()
+    ) {
       return null;
     }
 
@@ -119,15 +130,27 @@ export async function getCurrentUser() {
     return null;
   }
 
-  return db.user.findUnique({
-    where: { id: session.userId },
+  const user = await db.user.findFirst({
+    where: { id: session.userId, isActive: true },
     select: {
       id: true,
       username: true,
       email: true,
       role: true,
+      sessionVersion: true,
     },
   });
+
+  if (!user || user.sessionVersion !== session.sessionVersion) {
+    return null;
+  }
+
+  return {
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    role: user.role,
+  };
 }
 
 export async function requireUser() {

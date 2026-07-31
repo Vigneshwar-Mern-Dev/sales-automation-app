@@ -3,8 +3,9 @@
 import "server-only";
 
 import { db } from "./db";
+import { autoQueueWhatsAppForCaller } from "./whatsapp-auto-queue";
 
-const RINGING_TIMEOUT_MS = 30 * 1000;
+const RINGING_TIMEOUT_MS = 2 * 60 * 1000;
 
 export async function expireStaleRingingCalls() {
   const now = new Date();
@@ -13,39 +14,71 @@ export async function expireStaleRingingCalls() {
     where: {
       status: "RINGING",
       endedAt: null,
+      deletedAt: null,
+      isArchived: false,
+      lead: { is: { deletedAt: null, isArchived: false } },
       firstRingAt: { lte: cutoff },
     },
     select: {
       id: true,
       leadId: true,
       callerNumber: true,
+      callDirection: true,
       companyPhone: { select: { phoneNumber: true } },
+      lead: { select: { displayName: true } },
     },
+    orderBy: { firstRingAt: "asc" },
+    take: 100,
   });
 
   if (!staleCalls.length) {
     return 0;
   }
 
-  await db.$transaction(
-    staleCalls.flatMap((call) => [
-      db.callSession.update({
-        where: { id: call.id },
+  let expiredCount = 0;
+
+  for (const call of staleCalls) {
+    const transitioned = await db.$transaction(async (tx) => {
+      const updated = await tx.callSession.updateMany({
+        where: {
+          id: call.id,
+          status: "RINGING",
+          endedAt: null,
+          deletedAt: null,
+          isArchived: false,
+        },
         data: {
           status: "MISSED",
           endedAt: now,
         },
-      }),
-      db.callActivity.create({
+      });
+
+      if (updated.count !== 1) return false;
+
+      await tx.callActivity.create({
         data: {
           leadId: call.leadId,
           sessionId: call.id,
           actionType: "CALL_MISSED",
-          description: `Call auto-marked missed after 30 seconds from ${call.callerNumber} to ${call.companyPhone.phoneNumber}`,
+          description: `Call auto-marked missed after 2 minutes from ${call.callerNumber} to ${call.companyPhone.phoneNumber}`,
         },
-      }),
-    ]),
-  );
+      });
 
-  return staleCalls.length;
+      return true;
+    });
+
+    if (!transitioned) continue;
+    expiredCount += 1;
+
+    if (call.callDirection === "INCOMING") {
+      await autoQueueWhatsAppForCaller(
+        call.callerNumber,
+        call.lead.displayName,
+        "MISSED",
+        call.leadId,
+      );
+    }
+  }
+
+  return expiredCount;
 }

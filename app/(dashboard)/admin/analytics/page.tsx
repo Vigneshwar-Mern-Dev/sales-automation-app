@@ -224,13 +224,13 @@ export default async function AdminAnalyticsPage({ searchParams }: AnalyticsPage
   const since = getDateRange(range);
   const { data, error } = await getAnalyticsData(since);
 
-  const taskCounts = Object.fromEntries(taskStatuses.map((s) => [s, data.taskStatusCounts.find((r) => r.status === s)?._count._all ?? 0])) as Record<TaskStatus, number>;
-  const callCounts = Object.fromEntries(callLeadStatuses.map((s) => [s, data.callLeadStatusCounts.find((r) => r.status === s)?._count._all ?? 0])) as Record<CallLeadStatus, number>;
+  const taskCounts = Object.fromEntries(taskStatuses.map((s) => [s, data.taskStatusCounts.find((r: { status: string; _count: { _all: number } }) => r.status === s)?._count._all ?? 0])) as Record<TaskStatus, number>;
+  const callCounts = Object.fromEntries(callLeadStatuses.map((s) => [s, data.callLeadStatusCounts.find((r: { status: string; _count: { _all: number } }) => r.status === s)?._count._all ?? 0])) as Record<CallLeadStatus, number>;
   const totalTasks = Object.values(taskCounts).reduce((a, b) => a + b, 0);
   const totalCallLeads = Object.values(callCounts).reduce((a, b) => a + b, 0);
   const openTasks = taskCounts.PENDING + taskCounts.IN_PROGRESS;
   const openCallLeads = callCounts.NEW + callCounts.CONTACTED + callCounts.FOLLOW_UP + callCounts.INTERESTED + callCounts.NO_RESPONSE;
-  const urgentTasks = (data.taskPriorityCounts.find((r) => r.priority === TaskPriority.URGENT)?._count._all ?? 0) + (data.taskPriorityCounts.find((r) => r.priority === TaskPriority.HIGH)?._count._all ?? 0);
+  const urgentTasks = (data.taskPriorityCounts.find((r: { priority: string; _count: { _all: number } }) => r.priority === TaskPriority.URGENT)?._count._all ?? 0) + (data.taskPriorityCounts.find((r: { priority: string; _count: { _all: number } }) => r.priority === TaskPriority.HIGH)?._count._all ?? 0);
 
   const donutData: StatusPoint[] = callLeadStatuses.map((s) => ({ name: label(s), value: callCounts[s], color: STATUS_COLORS[s] ?? "#64748b" })).filter((d) => d.value > 0);
 
@@ -362,7 +362,7 @@ export default async function AdminAnalyticsPage({ searchParams }: AnalyticsPage
             <div>
               <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-400 mb-2">Top Cities</p>
               <div className="space-y-2">
-                {data.topCities.map((c) => (
+                {data.topCities.map((c: { city: string | null; _count: { _all: number } }) => (
                   <div key={c.city || "unknown"} className="flex items-center justify-between text-xs py-1 border-b border-white/5">
                     <span className="text-slate-300 font-medium truncate max-w-[120px]">{c.city || "Unknown"}</span>
                     <span className="font-bold text-white bg-white/5 px-2 py-0.5 rounded">{formatNumber(c._count._all)}</span>
@@ -374,7 +374,7 @@ export default async function AdminAnalyticsPage({ searchParams }: AnalyticsPage
             <div>
               <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-400 mb-2">Property Types</p>
               <div className="space-y-2">
-                {data.propertyTypes.map((p) => (
+                {data.propertyTypes.map((p: { ownershipType: string | null; _count: { _all: number } }) => (
                   <div key={p.ownershipType || "unknown"} className="flex items-center justify-between text-xs py-1 border-b border-white/5">
                     <span className="text-slate-300 font-medium capitalize truncate max-w-[120px]">{(p.ownershipType || "").toLowerCase()}</span>
                     <span className="font-bold text-white bg-white/5 px-2 py-0.5 rounded">{formatNumber(p._count._all)}</span>
@@ -401,9 +401,9 @@ export default async function AdminAnalyticsPage({ searchParams }: AnalyticsPage
               </tr>
             </thead>
             <tbody className="divide-y divide-white/10">
-              {data.users.map((u) => {
-                const completedCount = data.agentCompletedTasks.find((t) => t.assignedToId === u.id)?._count._all ?? 0;
-                const callStat = data.agentCallStats.find((c) => c.assignedToId === u.id);
+              {data.users.map((u: { id: string; username: string; role: string; _count: { assignedTasks: number; callLeads: number; callFollowUps: number } }) => {
+                const completedCount = data.agentCompletedTasks.find((t: { assignedToId: string; _count: { _all: number } }) => t.assignedToId === u.id)?._count._all ?? 0;
+                const callStat = data.agentCallStats.find((c: { assignedToId: string | null; _count: { _all: number }; _sum: { durationSeconds: number | null } }) => c.assignedToId === u.id);
                 const callsAttended = callStat?._count._all ?? 0;
                 const talkTimeSeconds = callStat?._sum.durationSeconds ?? 0;
 

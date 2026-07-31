@@ -22,16 +22,25 @@
 
 # misc
 .DS_Store
-*.pem
 
 # debug
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+*.next-dev-err.log
+*.next-dev-out.log
+.next-dev-err.log
+.next-dev-out.log
 
-# env files (can opt-in for committing if needed)
-.env*
+# env files — only .env.example should be committed
+.env
+.env.*
+!.env.example
+
+# secrets and keys
+*.pem
+server.env
 
 # vercel
 .vercel
@@ -40,7 +49,19 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# prisma generated client
 /app/generated/prisma
 /generated/prisma
 /generated/prisma-client
 /generated/prisma-live
+
+# whatsapp auth sessions and cache
+.whatsapp-auth/
+.whatsapp-auth-new/
+.wwebjs_cache/
+
+# logs
+/logs/
+
+# archives
+*.tar.gz

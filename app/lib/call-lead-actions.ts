@@ -42,6 +42,11 @@ function parseFollowUp(value: string | undefined) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+function optionalTrimmedUpdate(value: string | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 function hasSheetReadyCallLeadDetails(lead: {
   displayName: string;
   email: string | null;
@@ -94,7 +99,7 @@ async function syncCallLeadBackToSheet(lead: {
   updatedAt: Date;
 }) {
   const integration = await db.leadIntegration.findUnique({
-    where: { source: LeadSource.INSTAGRAM },
+    where: { source: LeadSource.CALLS },
   });
 
   if (!integration?.appScriptUrl || !integration.spreadsheetId || !integration.sheetName) {
@@ -177,15 +182,55 @@ function revalidateCallViews() {
 
 export async function adminDeleteCallLeadsAction(leadIds: string[]) {
   try {
-    await requireRole("ADMIN");
+    const admin = await requireRole("ADMIN");
 
     if (!leadIds.length) {
       return { error: "No call leads selected." };
     }
 
-    await db.callLead.deleteMany({
-      where: { id: { in: leadIds } },
-    });
+    const now = new Date();
+    await db.$transaction([
+      db.callLead.updateMany({
+        where: { id: { in: leadIds } },
+        data: {
+          isArchived: true,
+          archivedAt: now,
+          archivedBy: admin.id,
+          deletedAt: now,
+          deletedBy: admin.id,
+        },
+      }),
+      db.callSession.updateMany({
+        where: { leadId: { in: leadIds } },
+        data: {
+          isArchived: true,
+          archivedAt: now,
+          archivedBy: admin.id,
+          deletedAt: now,
+          deletedBy: admin.id,
+        },
+      }),
+      db.callFollowUp.updateMany({
+        where: { leadId: { in: leadIds } },
+        data: {
+          isArchived: true,
+          archivedAt: now,
+          archivedBy: admin.id,
+          deletedAt: now,
+          deletedBy: admin.id,
+        },
+      }),
+      ...leadIds.map((leadId) =>
+        db.callActivity.create({
+          data: {
+            leadId,
+            userId: admin.id,
+            actionType: "ARCHIVED",
+            description: "Call lead archived by admin",
+          },
+        }),
+      ),
+    ]);
 
     revalidateCallViews();
     return { success: true };
@@ -197,15 +242,43 @@ export async function adminDeleteCallLeadsAction(leadIds: string[]) {
 
 export async function adminDeleteCallSessionAction(sessionId: string) {
   try {
-    await requireRole("ADMIN");
+    const admin = await requireRole("ADMIN");
 
     if (!sessionId) {
       return { error: "Call session is required." };
     }
 
-    await db.callSession.delete({
+    const session = await db.callSession.findUnique({
       where: { id: sessionId },
+      select: { id: true, leadId: true },
     });
+
+    if (!session) {
+      return { error: "Call session not found." };
+    }
+
+    const now = new Date();
+    await db.$transaction([
+      db.callSession.update({
+        where: { id: session.id },
+        data: {
+          isArchived: true,
+          archivedAt: now,
+          archivedBy: admin.id,
+          deletedAt: now,
+          deletedBy: admin.id,
+        },
+      }),
+      db.callActivity.create({
+        data: {
+          leadId: session.leadId,
+          sessionId: session.id,
+          userId: admin.id,
+          actionType: "ARCHIVED",
+          description: "Call session archived by admin",
+        },
+      }),
+    ]);
 
     revalidateCallViews();
     return { success: true };
@@ -217,7 +290,7 @@ export async function adminDeleteCallSessionAction(sessionId: string) {
 
 export async function adminDeleteMissedCallbacksForLeadAction(sessionId: string) {
   try {
-    await requireRole("ADMIN");
+    const admin = await requireRole("ADMIN");
 
     if (!sessionId) {
       return { error: "Call session is required." };
@@ -232,12 +305,40 @@ export async function adminDeleteMissedCallbacksForLeadAction(sessionId: string)
       return { error: "Call session not found." };
     }
 
-    const result = await db.callSession.deleteMany({
+    const missedSessions = await db.callSession.findMany({
       where: {
         leadId: session.leadId,
         status: "MISSED",
+        deletedAt: null,
+      },
+      select: { id: true },
+    });
+
+    const now = new Date();
+    const result = await db.callSession.updateMany({
+      where: {
+        id: { in: missedSessions.map((missedSession) => missedSession.id) },
+      },
+      data: {
+        isArchived: true,
+        archivedAt: now,
+        archivedBy: admin.id,
+        deletedAt: now,
+        deletedBy: admin.id,
       },
     });
+
+    if (missedSessions.length) {
+      await db.callActivity.create({
+        data: {
+          leadId: session.leadId,
+          userId: admin.id,
+          actionType: "ARCHIVED",
+          description: `Archived ${missedSessions.length} missed callback session(s)`,
+          metadata: { sessionIds: missedSessions.map((missedSession) => missedSession.id) },
+        },
+      });
+    }
 
     revalidateCallViews();
     return { success: true, deletedCount: result.count };
@@ -253,8 +354,8 @@ export async function adminAssignCallLeadAction(leadId: string, assignedToId: st
     let assigneeName = "Unassigned";
 
     if (assignedToId) {
-      const assignee = await db.user.findUnique({
-        where: { id: assignedToId },
+      const assignee = await db.user.findFirst({
+        where: { id: assignedToId, isActive: true },
         select: { username: true },
       });
 
@@ -384,14 +485,14 @@ export async function createManualCallLeadAction(data: {
       where: { phone },
       update: {
         displayName,
-        email: data.email?.trim() || null,
-        city: data.city?.trim() || null,
-        language: data.language?.trim() || null,
-        address: data.address?.trim() || null,
-        ownershipType: data.ownershipType?.trim() || null,
-        locationSent: Boolean(data.locationSent),
-        message: data.message?.trim() || null,
-        notes: data.notes?.trim() || null,
+        email: optionalTrimmedUpdate(data.email),
+        city: optionalTrimmedUpdate(data.city),
+        language: optionalTrimmedUpdate(data.language),
+        address: optionalTrimmedUpdate(data.address),
+        ownershipType: optionalTrimmedUpdate(data.ownershipType),
+        locationSent: data.locationSent === undefined ? undefined : Boolean(data.locationSent),
+        message: optionalTrimmedUpdate(data.message),
+        notes: optionalTrimmedUpdate(data.notes),
         lastContactedAt: new Date(),
       },
       create: {
@@ -527,8 +628,8 @@ export async function updateCallLeadWorkflowAction(
     const assignedToId = data.assignedToId?.trim() || null;
 
     if (assignedToId) {
-      const assignee = await db.user.findUnique({
-        where: { id: assignedToId },
+      const assignee = await db.user.findFirst({
+        where: { id: assignedToId, isActive: true },
         select: { id: true, username: true },
       });
 
@@ -768,4 +869,3 @@ export async function syncCallLeadToSheetBackground(leadId: string) {
     console.error("[sheet-sync-bg] Background sheet sync failed:", error);
   }
 }
-

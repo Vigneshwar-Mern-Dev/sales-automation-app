@@ -28,17 +28,18 @@ export async function POST(request: NextRequest, context: RouteContext) {
   };
   const dueAt = parseDueAt(body.dueAt);
   const note = typeof body.note === "string" ? body.note.trim() : null;
-  const assignedToId =
+  const requestedAssigneeId =
     typeof body.assignedToId === "string" && body.assignedToId.trim()
       ? body.assignedToId.trim()
       : user.id;
+  const assignedToId = user.role === "ADMIN" ? requestedAssigneeId : user.id;
 
   if (!dueAt) {
     return NextResponse.json({ error: "A valid dueAt ISO date is required." }, { status: 400 });
   }
 
-  const lead = await db.callLead.findUnique({
-    where: { id: leadId },
+  const lead = await db.callLead.findFirst({
+    where: { id: leadId, deletedAt: null, isArchived: false },
     select: { id: true, assignedToId: true },
   });
 
@@ -53,8 +54,8 @@ export async function POST(request: NextRequest, context: RouteContext) {
     );
   }
 
-  const assignee = await db.user.findUnique({
-    where: { id: assignedToId },
+  const assignee = await db.user.findFirst({
+    where: { id: assignedToId, isActive: true },
     select: { id: true, username: true },
   });
 

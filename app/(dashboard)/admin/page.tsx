@@ -1,4 +1,4 @@
-import Link from "next/link";
+﻿import Link from "next/link";
 import { db } from "@/app/lib/db";
 import { CallLeadStatus, TaskStatus, WhatsAppLeadStatus } from "@/app/lib/prisma-enums";
 
@@ -38,7 +38,8 @@ async function getOverviewData() {
       callFollowUps,
       recentCallLeads,
       waSentToday,
-      waStatusCounts,
+      waQueued,
+      waReplied,
     ] = await Promise.all([
       db.user.count(),
       db.user.count({ where: { role: "ADMIN" } }),
@@ -51,12 +52,13 @@ async function getOverviewData() {
           status: { notIn: [TaskStatus.COMPLETED, TaskStatus.CANCELLED] },
         },
       }),
-      db.callLead.count({ where: { status: { in: openCallStatuses } } }),
+      db.callLead.count({ where: { status: { in: openCallStatuses }, deletedAt: null, isArchived: false } }),
       db.callLead.count({
-        where: { assignedToId: null, status: { in: openCallStatuses } },
+        where: { assignedToId: null, status: { in: openCallStatuses }, deletedAt: null, isArchived: false },
       }),
       db.callFollowUp.count({ where: { completedAt: null } }),
       db.callLead.findMany({
+        where: { deletedAt: null, isArchived: false },
         orderBy: { createdAt: "desc" },
         take: 6,
         select: {
@@ -68,17 +70,12 @@ async function getOverviewData() {
           createdAt: true,
         },
       }),
-      db.whatsAppLead.count({ where: { status: WhatsAppLeadStatus.SENT, lastSentAt: { gte: todayStart } } }),
-      db.whatsAppLead.groupBy({
-        by: ["status"],
-        where: { status: { in: [WhatsAppLeadStatus.QUEUED, WhatsAppLeadStatus.REPLIED] } },
-        _count: { _all: true },
-      }),
+      db.whatsAppQueueItem.count({ where: { status: "SENT", sentAt: { gte: todayStart }, deletedAt: null, isArchived: false } }),
+      db.whatsAppQueueItem.count({ where: { status: { in: ["QUEUED", "SENDING"] }, deletedAt: null, isArchived: false } }),
+      db.whatsAppLead.count({ where: { OR: [{ status: WhatsAppLeadStatus.REPLIED }, { lastReplyAt: { not: null } }], deletedAt: null, isArchived: false } }),
     ]);
 
     const standardUsers = totalUsers - adminUsers;
-    const waQueued = waStatusCounts.find((c) => c.status === WhatsAppLeadStatus.QUEUED)?._count._all ?? 0;
-    const waReplied = waStatusCounts.find((c) => c.status === WhatsAppLeadStatus.REPLIED)?._count._all ?? 0;
 
     return {
       data: {
@@ -123,13 +120,13 @@ export default async function AdminDashboard() {
 
   return (
     <div className="space-y-6 pb-8">
-      {/* ── Hero Header ─────────────────────────────────────────────────── */}
+      {/* Hero header */}
       <section className="relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-cyan-300/[0.08] via-white/[0.02] to-transparent p-6 md:p-8">
         <div className="pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-cyan-400/10 blur-3xl" />
         <div className="relative flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
           <div>
             <p className="text-xs font-bold uppercase tracking-[0.28em] text-cyan-300">
-              MAKT CRM — Admin
+              MAKT CRM - Admin
             </p>
             <h1 className="mt-3 text-4xl font-black tracking-tight text-white md:text-5xl">
               Dashboard
@@ -140,19 +137,19 @@ export default async function AdminDashboard() {
           </div>
           <div className="flex flex-wrap gap-2">
             <Link className="h-10 rounded-xl border border-cyan-300/30 bg-cyan-300/15 px-4 text-sm font-bold leading-10 text-cyan-100 transition hover:bg-cyan-300/25" href="/admin/calls/leads">
-              📞 Call leads
+              Call Leads
             </Link>
             <Link className="h-10 rounded-xl border border-white/10 px-4 text-sm font-semibold leading-10 text-slate-200 transition hover:bg-white/10" href="/admin/tasks">
-              ✅ Tasks
+              Tasks
             </Link>
             <Link className="h-10 rounded-xl border border-white/10 px-4 text-sm font-semibold leading-10 text-slate-200 transition hover:bg-white/10" href="/admin/analytics">
-              📊 Analytics
+              Analytics
             </Link>
             <Link className="h-10 rounded-xl border border-emerald-300/30 bg-emerald-300/15 px-4 text-sm font-bold leading-10 text-emerald-100 transition hover:bg-emerald-300/25" href="/admin/whatsapp">
-              💬 WhatsApp
+              WhatsApp
             </Link>
             <Link className="h-10 rounded-xl border border-white/10 px-4 text-sm font-semibold leading-10 text-slate-300 transition hover:bg-white/10" href="/admin/audit">
-              🗒 Audit log
+              Audit Log
             </Link>
           </div>
         </div>
@@ -164,14 +161,14 @@ export default async function AdminDashboard() {
         </div>
       ) : null}
 
-      {/* ── KPI Cards ───────────────────────────────────────────────────── */}
+      {/* KPI cards */}
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {([
           { 
             label: "Open call leads", 
             value: data.openCallLeads, 
             detail: "Needs operator action", 
-            icon: "📞", 
+            icon: "Calls",
             accent: "from-cyan-400/[0.05]", 
             border: "border-cyan-500/10", 
             tone: "text-cyan-300", 
@@ -181,7 +178,7 @@ export default async function AdminDashboard() {
             label: "Unassigned", 
             value: data.unassignedCallLeads, 
             detail: "No owner assigned", 
-            icon: "⚠️", 
+            icon: "Owner",
             accent: "from-sky-400/[0.05]", 
             border: "border-sky-500/10", 
             tone: "text-sky-300", 
@@ -191,7 +188,7 @@ export default async function AdminDashboard() {
             label: "Follow-ups", 
             value: data.callFollowUps, 
             detail: "Open callback work", 
-            icon: "🔔", 
+            icon: "Due",
             accent: "from-amber-400/[0.05]", 
             border: "border-amber-500/10", 
             tone: "text-amber-300", 
@@ -201,7 +198,7 @@ export default async function AdminDashboard() {
             label: "Open tasks", 
             value: data.openTasks, 
             detail: `${data.overdueTasks} overdue`, 
-            icon: "📋", 
+            icon: "Tasks",
             accent: "from-rose-400/[0.05]", 
             border: "border-rose-500/10", 
             tone: "text-rose-300", 
@@ -221,26 +218,26 @@ export default async function AdminDashboard() {
                 <p className={`mt-3 text-5xl font-black tracking-tight ${tone}`}>{value}</p>
                 <p className="mt-2 text-xs text-slate-500">{detail}</p>
               </div>
-              <span className="text-2xl opacity-60 transition-transform duration-300 group-hover:scale-110">{icon}</span>
+              <span className="text-xs font-bold uppercase tracking-wide opacity-60 transition-transform duration-300 group-hover:scale-110">{icon}</span>
             </div>
           </div>
         ))}
       </section>
 
-      {/* ── WhatsApp Panel ──────────────────────────────────────────────── */}
+      {/* WhatsApp panel */}
       <section className="group relative overflow-hidden rounded-2xl border border-emerald-500/15 bg-gradient-to-br from-emerald-500/[0.03] via-white/[0.01] to-transparent p-6 backdrop-blur-md transition-all duration-300 hover:border-emerald-400/40 hover:shadow-[0_0_35px_rgba(16,185,129,0.08)]">
         <div className="pointer-events-none absolute -bottom-12 -right-12 h-40 w-40 rounded-full bg-emerald-400/5 blur-3xl transition-all duration-500 group-hover:scale-110" />
         <div className="relative flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-base font-bold text-white flex items-center gap-2">
               <span className="animate-pulse h-2 w-2 rounded-full bg-emerald-400 inline-block" />
-              💬 WhatsApp automation
+              WhatsApp automation
             </h2>
             <p className="mt-1 text-sm text-slate-400">Today&apos;s outbound messaging snapshot</p>
           </div>
           <div className="flex gap-2">
             <Link className="h-9 rounded-xl border border-white/10 px-4 text-xs font-semibold leading-9 text-slate-200 transition-all duration-200 hover:bg-white/10 hover:border-white/25" href="/admin/whatsapp">
-              View panel →
+              View panel
             </Link>
           </div>
         </div>
@@ -258,7 +255,7 @@ export default async function AdminDashboard() {
         </div>
       </section>
 
-      {/* ── Recent leads + User summary ─────────────────────────────────── */}
+      {/* Recent leads and user summary */}
       <section className="grid gap-4 xl:grid-cols-[1.3fr_0.7fr]">
         {/* Recent call leads */}
         <div className="group rounded-2xl border border-white/10 bg-white/[0.01] p-6 backdrop-blur-md transition-all duration-300 hover:border-white/15 hover:shadow-[0_0_25px_rgba(255,255,255,0.02)]">
@@ -268,7 +265,7 @@ export default async function AdminDashboard() {
               <p className="mt-0.5 text-xs text-slate-500">Latest call records from the call center</p>
             </div>
             <Link className="h-8 rounded-lg border border-white/10 px-4 text-xs font-bold leading-8 text-slate-200 transition-all duration-200 hover:bg-white/10 hover:border-white/20" href="/admin/calls/leads">
-              View all →
+              View all
             </Link>
           </div>
 
@@ -290,7 +287,7 @@ export default async function AdminDashboard() {
                         {lead.displayName || lead.phone || "Unknown caller"}
                       </p>
                       <p className="mt-0.5 text-xs text-slate-500">
-                        {lead.assignedTo?.username || "Unassigned"} · {formatDate(lead.createdAt)}
+                        {lead.assignedTo?.username || "Unassigned"} - {formatDate(lead.createdAt)}
                       </p>
                     </div>
                   </div>
@@ -331,10 +328,10 @@ export default async function AdminDashboard() {
             <h2 className="text-base font-bold text-white">Quick links</h2>
             <div className="mt-3 space-y-2">
               {([
-                ["/admin/analytics", "📊 Analytics"],
-                ["/admin/audit", "🗒 Audit log"],
-                ["/admin/calls/missed", "📵 Callbacks"],
-                ["/admin/whatsapp/leads", "📋 WA leads"],
+                ["/admin/analytics", "Analytics"],
+                ["/admin/audit", "Audit Log"],
+                ["/admin/calls/missed", "Callbacks"],
+                ["/admin/whatsapp/leads", "WhatsApp Leads"],
               ] as const).map(([href, label]) => (
                 <Link key={href} href={href} className="flex h-10 items-center rounded-xl border border-white/5 bg-black/10 px-4 text-sm font-semibold text-slate-300 transition-all duration-200 hover:border-white/10 hover:bg-white/[0.04] hover:text-white">
                   {label}
@@ -347,4 +344,5 @@ export default async function AdminDashboard() {
     </div>
   );
 }
+
 

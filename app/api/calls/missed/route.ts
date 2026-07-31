@@ -1,14 +1,19 @@
 import { NextResponse } from "next/server";
 import { db } from "@/app/lib/db";
 import { expireStaleRingingCalls } from "@/app/lib/call-session-maintenance";
-import { requireUser } from "@/app/lib/session";
+import { requireRole } from "@/app/lib/session";
 
 export async function GET() {
-  await requireUser();
+  await requireRole("ADMIN");
   await expireStaleRingingCalls();
 
   const calls = await db.callSession.findMany({
-    where: { status: "MISSED" },
+    where: {
+      status: "MISSED",
+      deletedAt: null,
+      isArchived: false,
+      lead: { is: { deletedAt: null, isArchived: false } },
+    },
     include: {
       companyPhone: {
         select: { id: true, phoneNumber: true, label: true },
@@ -34,5 +39,8 @@ export async function GET() {
     take: 100,
   });
 
-  return NextResponse.json({ ok: true, serverTime: new Date().toISOString(), calls });
+  return NextResponse.json(
+    { ok: true, serverTime: new Date().toISOString(), calls },
+    { headers: { "Cache-Control": "no-store" } },
+  );
 }

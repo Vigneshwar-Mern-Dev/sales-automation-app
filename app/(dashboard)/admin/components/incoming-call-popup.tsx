@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 
 type LiveCall = {
@@ -47,40 +47,100 @@ function isNewLead(call: LiveCall, now: number) {
   return call.lead._count.sessions <= 1 || (!Number.isNaN(createdAt) && now - createdAt < 10 * 60 * 1000);
 }
 
+const STORAGE_KEY = "dismissed-call-popup-ids";
+
+function loadDismissedFromStorage(): Set<string> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as string[];
+      if (Array.isArray(parsed)) return new Set(parsed);
+    }
+  } catch {
+    // Ignore corrupt data
+  }
+  return new Set();
+}
+
+function saveDismissedToStorage(ids: Set<string>) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify([...ids]));
+  } catch {
+    // Storage full or unavailable
+  }
+}
+
 export function IncomingCallPopup() {
   const [calls, setCalls] = useState<LiveCall[]>([]);
-  const [dismissedIds, setDismissedIds] = useState<Set<string>>(() => new Set());
+  const [dismissedIds, setDismissedIds] = useState<Set<string>>(() => loadDismissedFromStorage());
   const [now, setNow] = useState(() => Date.now());
+  const serverOffsetMs = useRef(0);
+
+  // Persist dismissed IDs whenever they change
+  const dismissCall = useCallback((callId: string) => {
+    setDismissedIds((current) => {
+      const next = new Set(current);
+      next.add(callId);
+      saveDismissedToStorage(next);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
+    let isLoading = false;
+    const controller = new AbortController();
 
     async function loadLiveCalls() {
+      if (isLoading) return;
+      isLoading = true;
+
       try {
         const response = await fetch("/api/calls/live", {
           cache: "no-store",
+          signal: controller.signal,
         });
 
         if (!response.ok) {
           return;
         }
 
-        const payload = (await response.json()) as { calls?: LiveCall[] };
+        const payload = (await response.json()) as { calls?: LiveCall[]; serverTime?: string };
 
         if (isMounted) {
-          setCalls(payload.calls || []);
+          // Only show incoming calls in the popup
+          const nextCalls = (payload.calls || []).filter(
+            (call) => call.callDirection !== "OUTGOING",
+          );
+          const serverTime = payload.serverTime ? new Date(payload.serverTime).getTime() : Number.NaN;
+          if (!Number.isNaN(serverTime)) {
+            serverOffsetMs.current = serverTime - Date.now();
+            setNow(serverTime);
+          }
+          setCalls(nextCalls);
+          // Prune stale dismissed IDs that are no longer active
+          const activeIds = new Set(nextCalls.map((call) => call.id));
+          setDismissedIds((current) => {
+            const pruned = new Set([...current].filter((id) => activeIds.has(id)));
+            saveDismissedToStorage(pruned);
+            return pruned;
+          });
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
         // Polling should fail quietly; the page itself should not break.
+      } finally {
+        isLoading = false;
       }
     }
 
     loadLiveCalls();
     const intervalId = window.setInterval(loadLiveCalls, 4000);
-    const clockId = window.setInterval(() => setNow(Date.now()), 1000);
+    const clockId = window.setInterval(() => setNow(Date.now() + serverOffsetMs.current), 1000);
 
     return () => {
       isMounted = false;
+      controller.abort();
       window.clearInterval(intervalId);
       window.clearInterval(clockId);
     };
@@ -96,25 +156,19 @@ export function IncomingCallPopup() {
   }
 
   const isRinging = visibleCall.status === "RINGING";
-  const isOutgoing = visibleCall.callDirection === "OUTGOING";
   const newLead = isNewLead(visibleCall, now);
   const ringAgeSeconds = Math.max(
     0,
     Math.floor((now - new Date(visibleCall.firstRingAt).getTime()) / 1000),
   );
-  const ringSecondsLeft = Math.max(0, 30 - ringAgeSeconds);
-
-  if (isRinging && ringAgeSeconds >= 30) {
-    return null;
-  }
 
   return (
     <div className={`fixed bottom-5 right-5 z-[60] w-[min(calc(100vw-2.5rem),400px)] rounded-lg border p-4 shadow-2xl ${isRinging ? "border-emerald-300/35 bg-[#0d1512] shadow-emerald-950/40" : "border-cyan-300/30 bg-[#0d1118] shadow-cyan-950/40"}`}>
       <div className="flex items-start justify-between gap-4">
         <div>
           <div className="flex flex-wrap items-center gap-2">
-            <span className={`rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.12em] ${isOutgoing ? "border-amber-300/25 bg-amber-300/10 text-amber-100" : "border-emerald-300/25 bg-emerald-300/10 text-emerald-100"}`}>
-              {isOutgoing ? "Outgoing" : isRinging ? "Live Ringing" : "Active Call"}
+            <span className={`rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.12em] border-emerald-300/25 bg-emerald-300/10 text-emerald-100`}>
+              {isRinging ? "Live Ringing" : "Active Call"}
             </span>
             {newLead ? (
               <span className="rounded-full border border-rose-300/25 bg-rose-300/10 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.12em] text-rose-100">
@@ -135,13 +189,7 @@ export function IncomingCallPopup() {
         <button
           aria-label="Dismiss incoming call popup"
           className="grid h-8 w-8 place-items-center rounded-lg border border-white/10 bg-white/5 text-slate-400 transition hover:text-white"
-          onClick={() =>
-            setDismissedIds((current) => {
-              const next = new Set(current);
-              next.add(visibleCall.id);
-              return next;
-            })
-          }
+          onClick={() => dismissCall(visibleCall.id)}
           type="button"
         >
           x
@@ -158,7 +206,7 @@ export function IncomingCallPopup() {
           <p className="text-slate-500">Started</p>
           <p className="mt-1 font-semibold text-slate-200">{formatTime(visibleCall.firstRingAt)}</p>
           <p className="mt-1 text-slate-500">
-            {isRinging ? `${ringSecondsLeft}s before callback queue` : "On call"}
+            {isRinging ? `${ringAgeSeconds}s ringing` : "On call"}
           </p>
         </div>
         <div>
@@ -182,7 +230,7 @@ export function IncomingCallPopup() {
         </Link>
         <Link
           className="h-10 flex-1 rounded-lg border border-white/10 text-center text-sm font-bold leading-10 text-slate-200 transition hover:bg-white/10"
-          href="/admin/calls/leads"
+          href={`/admin/calls/leads?q=${encodeURIComponent(visibleCall.lead.phone)}`}
         >
           Open Lead
         </Link>

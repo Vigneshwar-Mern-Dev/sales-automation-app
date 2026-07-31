@@ -9,31 +9,41 @@
     "build": "next build",
     "postinstall": "prisma generate",
     "start": "next start",
-    "start:prod": "pm2 start ecosystem.config.js",
+    "start:prod": "pm2 startOrReload ecosystem.config.js --update-env",
     "stop:prod": "pm2 stop ecosystem.config.js",
     "lint": "eslint",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "next typegen && tsc --noEmit --incremental false",
     "check": "npm run prisma:validate && npm run lint && npm run typecheck && npm run build",
     "test": "npm run check",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:ci": "vitest run",
     "prisma:generate": "prisma generate",
     "prisma:validate": "prisma validate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
     "seed:admin": "node prisma/seed-admin.mjs",
-    "whatsapp:worker": "node scripts/whatsapp-worker.mjs"
+    "whatsapp:worker": "node scripts/whatsapp-worker.mjs",
+    "queue:reset-stuck": "node scripts/reset-stuck-queue.mjs",
+    "cleanup:login-attempts": "node scripts/cleanup-login-attempts.mjs",
+    "cleanup:security": "node scripts/cleanup-login-attempts.mjs",
+    "setup:production": "bash scripts/setup-production.sh",
+    "backup:encrypted": "bash scripts/create-encrypted-backup.sh",
+    "migrate:calls-integration": "node scripts/migrate-calls-integration.mjs"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",
     "@types/qrcode": "^1.5.6",
     "dotenv": "^17.4.2",
     "framer-motion": "^12.40.0",
-    "next": "16.2.6",
+    "next": "16.2.11",
     "prisma": "^6.19.3",
     "qrcode": "^1.5.4",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "recharts": "^3.8.1",
-    "whatsapp-web.js": "^1.34.7"
+    "whatsapp-web.js": "^1.34.7",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
@@ -42,8 +52,14 @@
     "@types/react-dom": "^19",
     "concurrently": "^10.0.3",
     "eslint": "^9",
-    "eslint-config-next": "16.2.6",
+    "eslint-config-next": "16.2.11",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^3.2.7"
+  },
+  "overrides": {
+    "js-yaml": "4.3.0",
+    "postcss": "8.5.23",
+    "sharp": "0.35.3"
   }
 }

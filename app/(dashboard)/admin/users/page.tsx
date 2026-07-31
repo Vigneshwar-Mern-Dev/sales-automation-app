@@ -9,6 +9,7 @@ type UserListItem = {
   email: string;
   role: "ADMIN" | "USER";
   department: string;
+  isActive: boolean;
   createdAt: Date;
 };
 
@@ -29,6 +30,7 @@ async function getUsers() {
         email: true,
         role: true,
         department: true,
+        isActive: true,
         createdAt: true,
       },
     });
@@ -90,9 +92,16 @@ function UserTable({
                   </td>
                   <td className="px-5 py-4 text-slate-400">{user.email}</td>
                   <td className="px-5 py-4">
-                    <span className="rounded-lg border border-cyan-300/20 bg-cyan-300/10 px-2 py-1 text-xs font-semibold text-cyan-100">
-                      {user.role}
-                    </span>
+                    <div className="flex flex-wrap gap-1.5">
+                      <span className="rounded-lg border border-cyan-300/20 bg-cyan-300/10 px-2 py-1 text-xs font-semibold text-cyan-100">
+                        {user.role}
+                      </span>
+                      {!user.isActive ? (
+                        <span className="rounded-lg border border-amber-300/20 bg-amber-300/10 px-2 py-1 text-xs font-semibold text-amber-200">
+                          INACTIVE
+                        </span>
+                      ) : null}
+                    </div>
                   </td>
                   <td className="px-5 py-4 text-slate-400">
                     {user.createdAt.toLocaleDateString("en-IN", {

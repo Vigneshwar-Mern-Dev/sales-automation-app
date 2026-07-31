@@ -80,8 +80,8 @@ export async function createTaskAction(formData: FormData) {
     redirectWithError("/admin/tasks", "Task title and assigned user are required.");
   }
 
-  const assignedUser = await db.user.findUnique({
-    where: { id: assignedToId },
+  const assignedUser = await db.user.findFirst({
+    where: { id: assignedToId, isActive: true },
     select: { id: true },
   });
 
@@ -115,6 +115,15 @@ export async function updateTaskAction(formData: FormData) {
 
   if (!taskId || !title || !assignedToId) {
     redirectWithError("/admin/tasks", "Task, title, and assigned user are required.");
+  }
+
+  const assignedUser = await db.user.findFirst({
+    where: { id: assignedToId, isActive: true },
+    select: { id: true },
+  });
+
+  if (!assignedUser) {
+    redirectWithError("/admin/tasks", "Assigned user does not exist or is inactive.");
   }
 
   await db.task.update({

@@ -1,64 +1,101 @@
 import { NextRequest, NextResponse } from "next/server";
+import { apiErrorResponse } from "@/app/lib/call-tracker-api-response";
 import {
   registerCompanyPhone,
   validateRegistrationSecret,
 } from "@/app/lib/call-tracker";
+import { consumeRateLimit, rateLimitKey } from "@/app/lib/rate-limit";
+import { getClientIpFromHeaders } from "@/app/lib/request-ip";
+import { callTrackerRegistrationSchema } from "@/app/lib/validators/call-tracker";
+import { validateValue } from "@/app/lib/validators/validate";
 
 function getErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
-function apiError(error: string, status: number, retryable: boolean, code: string) {
-  return NextResponse.json(
-    {
-      ok: false,
-      code,
-      error,
-      retryable,
-      serverTime: new Date().toISOString(),
-    },
-    { status },
-  );
-}
-
 export async function POST(request: NextRequest) {
   try {
-    const body = (await request.json().catch(() => ({}))) as {
-      registrationSecret?: unknown;
-      companyPhone?: unknown;
-      deviceId?: unknown;
-      label?: unknown;
-    };
+    const clientIp = getClientIpFromHeaders(request.headers);
+    const ipLimit = await consumeRateLimit({
+      key: rateLimitKey("call-tracker-register-ip", clientIp),
+      limit: 10,
+      windowMs: 60 * 60 * 1000,
+      blockMs: 60 * 60 * 1000,
+    });
+
+    if (!ipLimit.allowed) {
+      return apiErrorResponse({
+        code: "RATE_LIMITED",
+        error: "Too many registration attempts. Try again later.",
+        status: 429,
+        retryable: true,
+        retryAfterSeconds: ipLimit.retryAfterSeconds,
+      });
+    }
+
+    const rawBody = await request.json().catch(() => ({}));
+    const registrationSecret =
+      rawBody && typeof rawBody === "object" && "registrationSecret" in rawBody
+        ? rawBody.registrationSecret
+        : undefined;
     let isAuthorized = false;
 
     try {
-      isAuthorized = validateRegistrationSecret(body.registrationSecret);
+      isAuthorized = validateRegistrationSecret(registrationSecret);
     } catch (error) {
       console.error("Call tracker registration is not configured:", error);
-      return apiError(
-        "Call tracker registration is not configured on the server.",
-        500,
-        false,
-        "REGISTRATION_SECRET_NOT_CONFIGURED",
-      );
+      return apiErrorResponse({
+        code: "REGISTRATION_SECRET_NOT_CONFIGURED",
+        error: "Call tracker registration is not configured on the server.",
+        status: 500,
+        retryable: false,
+      });
     }
 
     if (!isAuthorized) {
-      return apiError("Unauthorized registration secret.", 401, false, "INVALID_REGISTRATION_SECRET");
+      return apiErrorResponse({
+        code: "INVALID_REGISTRATION_SECRET",
+        error: "Unauthorized registration secret.",
+        status: 401,
+        retryable: false,
+      });
     }
 
-    if (typeof body.companyPhone !== "string" || typeof body.deviceId !== "string") {
-      return apiError("companyPhone and deviceId are required.", 400, false, "INVALID_REGISTRATION_PAYLOAD");
+    const validation = validateValue(rawBody, callTrackerRegistrationSchema, {
+      retryable: false,
+      includeServerTime: true,
+    });
+    if (!validation.success) {
+      return validation.response;
+    }
+
+    const body = validation.data;
+    const deviceLimit = await consumeRateLimit({
+      key: rateLimitKey("call-tracker-register-device", body.deviceId),
+      limit: 5,
+      windowMs: 60 * 60 * 1000,
+      blockMs: 60 * 60 * 1000,
+    });
+
+    if (!deviceLimit.allowed) {
+      return apiErrorResponse({
+        code: "RATE_LIMITED",
+        error: "This device has been registered too many times. Try again later.",
+        status: 429,
+        retryable: true,
+        retryAfterSeconds: deviceLimit.retryAfterSeconds,
+      });
     }
 
     const result = await registerCompanyPhone({
       companyPhone: body.companyPhone,
       deviceId: body.deviceId,
-      label: typeof body.label === "string" ? body.label : undefined,
+      label: body.label,
     });
 
     return NextResponse.json({
       ok: true,
+      success: true,
       retryable: false,
       serverTime: new Date().toISOString(),
       companyPhone: {
@@ -69,21 +106,17 @@ export async function POST(request: NextRequest) {
       },
       deviceToken: result.deviceToken,
       warning: "Store deviceToken on the Android device. It cannot be recovered later.",
-    });
+    }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     console.error("Call tracker registration failed:", error);
     const message = getErrorMessage(error, "Call tracker registration failed.");
     const isConflict = message.includes("already linked to different company phones");
 
-    return NextResponse.json(
-      {
-        ok: false,
-        code: isConflict ? "DEVICE_PHONE_CONFLICT" : "REGISTRATION_FAILED",
-        error: message,
-        retryable: !isConflict,
-        serverTime: new Date().toISOString(),
-      },
-      { status: isConflict ? 409 : 500 },
-    );
+    return apiErrorResponse({
+      code: isConflict ? "DEVICE_PHONE_CONFLICT" : "REGISTRATION_FAILED",
+      error: message,
+      status: isConflict ? 409 : 500,
+      retryable: !isConflict,
+    });
   }
 }

@@ -46,7 +46,7 @@ export default async function AdminMissedCallsPage() {
       take: 100,
     }),
     db.user.findMany({
-      where: { role: "USER" },
+      where: { role: "USER", isActive: true },
       select: { id: true, username: true, email: true, department: true },
       orderBy: { username: "asc" },
     }),

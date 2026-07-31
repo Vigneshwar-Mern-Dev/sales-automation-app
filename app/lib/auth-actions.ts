@@ -1,31 +1,30 @@
 "use server";
 
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { db } from "./db";
 import { verifyPassword } from "./password";
+import { hasPrismaCode } from "./prisma-utils";
+import { consumeRateLimit, rateLimitKey, resetRateLimit } from "./rate-limit";
+import { getClientIpFromHeaders } from "./request-ip";
 import { createSession, destroySession } from "./session";
 
-const loginAttempts = new Map<string, { count: number; lockedUntil: number }>();
-const maxLoginAttempts = 5;
-const loginLockMs = 1000 * 60 * 10;
+const loginWindowMs = 10 * 60 * 1000;
 
-function formValue(formData: FormData, key: string) {
+function formValue(formData: FormData, key: string, trim = true) {
   const value = formData.get(key);
-  return typeof value === "string" ? value.trim() : "";
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  return trim ? value.trim() : value;
 }
 
 function redirectWithError(path: string, message: string): never {
   redirect(`${path}?error=${encodeURIComponent(message)}`);
 }
 
-function hasPrismaCode(error: unknown, code: string) {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: unknown }).code === code
-  );
-}
+
 
 function handleDatabaseError(path: string, error: unknown): never {
   if (hasPrismaCode(error, "P1001")) {
@@ -38,64 +37,56 @@ function handleDatabaseError(path: string, error: unknown): never {
   throw error;
 }
 
-function assertLoginAllowed(identifier: string) {
-  const attempt = loginAttempts.get(identifier);
-
-  if (attempt && attempt.lockedUntil > Date.now()) {
-    redirectWithError(
-      "/login",
-      "Too many failed login attempts. Wait 10 minutes, then try again.",
-    );
-  }
-}
-
-function recordFailedLogin(identifier: string) {
-  const current = loginAttempts.get(identifier);
-  const count = (current?.count ?? 0) + 1;
-
-  loginAttempts.set(identifier, {
-    count,
-    lockedUntil: count >= maxLoginAttempts ? Date.now() + loginLockMs : 0,
-  });
-}
-
-function clearFailedLogins(identifier: string) {
-  loginAttempts.delete(identifier);
-}
-
 export async function loginAction(formData: FormData) {
   const identifier = formValue(formData, "identifier").toLowerCase();
-  const password = formValue(formData, "password");
+  const password = formValue(formData, "password", false);
 
   if (!identifier || !password) {
     redirectWithError("/login", "Enter your username or email and password.");
   }
 
-  assertLoginAllowed(identifier);
-
-  let user;
+  const ipAddress = getClientIpFromHeaders(await headers());
+  const ipKey = rateLimitKey("login-ip", ipAddress);
+  const accountIpKey = rateLimitKey("login-account-ip", identifier, ipAddress);
 
   try {
-    user = await db.user.findFirst({
+    const [ipLimit, accountIpLimit] = await Promise.all([
+      consumeRateLimit({ key: ipKey, limit: 30, windowMs: loginWindowMs }),
+      consumeRateLimit({
+        key: accountIpKey,
+        limit: 5,
+        windowMs: loginWindowMs,
+        blockMs: loginWindowMs,
+      }),
+    ]);
+
+    if (!ipLimit.allowed || !accountIpLimit.allowed) {
+      redirectWithError(
+        "/login",
+        "Too many login attempts from this network. Wait a few minutes, then try again.",
+      );
+    }
+
+    const user = await db.user.findFirst({
       where: {
+        isActive: true,
         OR: [{ email: identifier }, { username: identifier }],
       },
     });
+
+    if (!user || !(await verifyPassword(password, user.passwordHash))) {
+      redirectWithError(
+        "/login",
+        "We could not sign you in. Check your details or contact your CRM administrator.",
+      );
+    }
+
+    await resetRateLimit(accountIpKey);
+    await createSession(user);
+    redirect(user.role === "ADMIN" ? "/admin" : "/user");
   } catch (error) {
     handleDatabaseError("/login", error);
   }
-
-  if (!user || !(await verifyPassword(password, user.passwordHash))) {
-    recordFailedLogin(identifier);
-    redirectWithError(
-      "/login",
-      "We could not sign you in. Check your details or contact your CRM administrator.",
-    );
-  }
-
-  clearFailedLogins(identifier);
-  await createSession(user);
-  redirect(user.role === "ADMIN" ? "/admin" : "/user");
 }
 
 export async function registerAction() {

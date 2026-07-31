@@ -1,9 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import type { Prisma } from "@prisma/client";
+import { apiErrorResponse } from "@/app/lib/call-tracker-api-response";
 import {
   authenticateCompanyPhone,
   updateCompanyPhoneHealth,
 } from "@/app/lib/call-tracker";
+import { consumeRateLimit, rateLimitKey } from "@/app/lib/rate-limit";
+import { callTrackerHeartbeatSchema } from "@/app/lib/validators/call-tracker";
+import { validateBody } from "@/app/lib/validators/validate";
 
 function getBearerToken(request: NextRequest) {
   const authorization = request.headers.get("authorization");
@@ -15,102 +18,85 @@ function getBearerToken(request: NextRequest) {
   return authorization.slice("Bearer ".length).trim();
 }
 
-function parseOptionalNumber(value: unknown) {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : undefined;
-  }
-
-  return undefined;
-}
-
-function parseOptionalBoolean(value: unknown) {
-  if (typeof value === "boolean") {
-    return value;
-  }
-
-  if (typeof value === "string") {
-    const normalized = value.trim().toLowerCase();
-    if (normalized === "true") return true;
-    if (normalized === "false") return false;
-  }
-
-  return undefined;
-}
-
-function parseOptionalDate(value: unknown) {
-  if (typeof value !== "string" || !value.trim()) {
-    return undefined;
-  }
-
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? undefined : date;
-}
-
-function parseOptionalString(value: unknown) {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function apiError(error: string, status: number, retryable: boolean) {
-  return NextResponse.json(
-    {
-      ok: false,
-      error,
-      retryable,
-      serverTime: new Date().toISOString(),
-    },
-    { status },
-  );
-}
-
 export async function POST(request: NextRequest) {
-  const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-  const deviceId = typeof body.deviceId === "string" ? body.deviceId.trim() : "";
+  const validation = await validateBody(request, callTrackerHeartbeatSchema, {
+    retryable: false,
+    includeServerTime: true,
+  });
+  if (!validation.success) {
+    return validation.response;
+  }
+
+  const body = validation.data;
   const token = getBearerToken(request);
 
-  if (!deviceId || !token) {
-    return apiError("deviceId and bearer token are required.", 400, false);
+  if (!token) {
+    return apiErrorResponse({
+      code: "AUTH_REQUIRED",
+      error: "A bearer token is required.",
+      status: 401,
+      retryable: false,
+    });
   }
 
-  const companyPhone = await authenticateCompanyPhone(deviceId, token);
+  const companyPhone = await authenticateCompanyPhone(body.deviceId, token);
 
   if (!companyPhone) {
-    return apiError("Unauthorized device.", 401, false);
+    return apiErrorResponse({
+      code: "UNAUTHORIZED_DEVICE",
+      error: "Unauthorized device.",
+      status: 401,
+      retryable: false,
+    });
+  }
+
+  const limit = await consumeRateLimit({
+    key: rateLimitKey("call-tracker-heartbeat", companyPhone.id),
+    limit: 180,
+    windowMs: 5 * 60 * 1000,
+  });
+
+  if (!limit.allowed) {
+    return apiErrorResponse({
+      code: "RATE_LIMITED",
+      error: "Heartbeat rate limit exceeded.",
+      status: 429,
+      retryable: true,
+      retryAfterSeconds: limit.retryAfterSeconds,
+    });
   }
 
   try {
     await updateCompanyPhoneHealth(companyPhone.id, {
-      appVersion: parseOptionalString(body.appVersion),
-      androidVersion: parseOptionalString(body.androidVersion),
-      deviceModel: parseOptionalString(body.deviceModel),
-      batteryPercent: parseOptionalNumber(body.batteryPercent),
-      isCharging: parseOptionalBoolean(body.isCharging),
-      chargingType: parseOptionalString(body.chargingType),
-      networkType: parseOptionalString(body.networkType),
-      pendingSyncCount: parseOptionalNumber(body.pendingSyncCount),
-      lastSyncAttemptAt: parseOptionalDate(body.lastSyncAttemptAt),
-      lastSuccessfulSyncAt: parseOptionalDate(body.lastSuccessfulSyncAt),
-      lastSyncError:
-        body.lastSyncError === null ? null : parseOptionalString(body.lastSyncError),
-      lastSyncErrorAt: parseOptionalDate(body.lastSyncErrorAt),
-      syncRetryCount: parseOptionalNumber(body.syncRetryCount),
-      permissionStatus:
-        body.permissionStatus && typeof body.permissionStatus === "object"
-          ? (body.permissionStatus as Prisma.InputJsonValue)
-          : undefined,
+      appVersion: body.appVersion,
+      androidVersion: body.androidVersion,
+      deviceModel: body.deviceModel,
+      batteryPercent: body.batteryPercent,
+      isCharging: body.isCharging,
+      chargingType: body.chargingType,
+      networkType: body.networkType,
+      pendingSyncCount: body.pendingSyncCount,
+      lastSyncAttemptAt: body.lastSyncAttemptAt,
+      lastSuccessfulSyncAt: body.lastSuccessfulSyncAt,
+      lastSyncError: body.lastSyncError,
+      lastSyncErrorAt: body.lastSyncErrorAt,
+      syncRetryCount: body.syncRetryCount,
+      permissionStatus: body.permissionStatus,
     });
   } catch (error) {
     console.error("Call tracker heartbeat failed:", error);
-    return apiError("Call tracker heartbeat failed.", 500, true);
+    return apiErrorResponse({
+      code: "HEARTBEAT_FAILED",
+      error: "Call tracker heartbeat failed.",
+      status: 500,
+      retryable: true,
+    });
   }
 
   return NextResponse.json({
     ok: true,
+    success: true,
     retryable: false,
     serverTime: new Date().toISOString(),
-  });
+  }, { headers: { "Cache-Control": "no-store" } });
 }

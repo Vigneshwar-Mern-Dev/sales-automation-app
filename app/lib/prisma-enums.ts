@@ -52,6 +52,7 @@ export const TaskPriority = {
 export const LeadSource = {
   WEBSITE: "WEBSITE",
   INSTAGRAM: "INSTAGRAM",
+  CALLS: "CALLS",
 } as const satisfies Record<PrismaLeadSource, PrismaLeadSource>;
 
 export const LeadStage = {
@@ -123,6 +124,14 @@ export const CallActivityType = {
   ASSIGNMENT_CHANGE: "ASSIGNMENT_CHANGE",
   NOTE_ADDED: "NOTE_ADDED",
   FOLLOW_UP_UPDATE: "FOLLOW_UP_UPDATE",
+  WHATSAPP_QUEUED: "WHATSAPP_QUEUED",
+  WHATSAPP_SENDING: "WHATSAPP_SENDING",
+  WHATSAPP_SENT: "WHATSAPP_SENT",
+  WHATSAPP_OPENED: "WHATSAPP_OPENED",
+  WHATSAPP_FAILED: "WHATSAPP_FAILED",
+  FORM_STARTED: "FORM_STARTED",
+  FORM_SUBMITTED: "FORM_SUBMITTED",
+  ARCHIVED: "ARCHIVED",
 } as const satisfies Record<PrismaCallActivityType, PrismaCallActivityType>;
 
 export const WhatsAppConnectionStatus = {
@@ -141,8 +150,18 @@ export const WhatsAppLeadStatus = {
   NEW: "NEW",
   OPTED_IN: "OPTED_IN",
   QUEUED: "QUEUED",
+  SENDING: "SENDING",
   SENT: "SENT",
+  OPENED: "OPENED",
+  FORM_STARTED: "FORM_STARTED",
+  FORM_SUBMITTED: "FORM_SUBMITTED",
+  ASSIGNED: "ASSIGNED",
+  FOLLOW_UP: "FOLLOW_UP",
+  INTERESTED: "INTERESTED",
+  CONVERTED: "CONVERTED",
   FAILED: "FAILED",
+  EXPIRED: "EXPIRED",
+  CANCELLED: "CANCELLED",
   REPLIED: "REPLIED",
   DO_NOT_CONTACT: "DO_NOT_CONTACT",
 } as const satisfies Record<PrismaWhatsAppLeadStatus, PrismaWhatsAppLeadStatus>;

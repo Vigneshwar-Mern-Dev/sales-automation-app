@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { logoutAction } from "@/app/lib/auth-actions";
 import { CallCenterLiveSync } from "../../components/call-center-live-sync";
 import { IncomingCallPopup } from "./incoming-call-popup";
+import { WhatsAppStatusPopup } from "./whatsapp-status-popup";
 
 type AdminShellProps = {
   children: ReactNode;
@@ -81,6 +82,15 @@ const navItems: NavItem[] = [
       { href: "/admin/calls/missed", label: "Callbacks" },
       { href: "/admin/calls/phones", label: "Company Phones" },
     ],
+  },
+  {
+    href: "/admin/client-processing",
+    label: "Client Processing",
+    icon: (
+      <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none">
+        <path d="M17 20h5v-2a3 3 0 0 0-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 0 1 5.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 0 1 9.288 0M15 7a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2 2 0 1 1-4 0 2 2 0 0 1 4 0ZM7 10a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    ),
   },
   {
     href: "/admin/whatsapp",
@@ -312,6 +322,7 @@ export function AdminShell({ children, user }: AdminShellProps) {
       </div>
       {pathname.startsWith("/admin/calls") ? <CallCenterLiveSync /> : null}
       <IncomingCallPopup />
+      <WhatsAppStatusPopup />
     </main>
   );
 }

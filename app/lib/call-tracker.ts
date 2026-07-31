@@ -3,9 +3,11 @@ import "server-only";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import type { CallDirection, CallEventType, Prisma } from "@prisma/client";
 import { db } from "./db";
+import { hasPrismaCode } from "./prisma-utils";
 import { autoQueueWhatsAppForCaller } from "./whatsapp-auto-queue";
 
 const openSessionStatuses = ["RINGING", "ANSWERED"] as const;
+
 
 export type RegisterCompanyPhoneInput = {
   companyPhone: string;
@@ -223,7 +225,7 @@ function sessionStatusForEvent(eventType: CallEventType, wasAnswered: boolean) {
   }
 
   if (eventType === "MISSED") {
-    return "MISSED" as const;
+    return wasAnswered ? ("COMPLETED" as const) : ("MISSED" as const);
   }
 
   return wasAnswered ? ("COMPLETED" as const) : ("MISSED" as const);
@@ -272,6 +274,8 @@ function findOpenSessionArgs(input: {
     companyPhoneId: input.companyPhoneId,
     status: { in: [...openSessionStatuses] },
     endedAt: null,
+    deletedAt: null,
+    isArchived: false,
   };
 
   if (input.localSessionId) {
@@ -345,14 +349,31 @@ export async function ingestCallEvent(input: CallTrackerEventInput) {
     };
   }
 
-  const txResult = await db.$transaction(async (tx) => {
-    const latestOpenSession = await tx.callSession.findFirst(
-      findOpenSessionArgs({
-        companyPhoneId: companyPhone.id,
-        callerNumber,
-        localSessionId,
-      }),
-    );
+  const runTransaction = () => db.$transaction(async (tx) => {
+    const sessionLockKey = `call-session:${companyPhone.id}:${localSessionId ?? callerNumber ?? "unknown"}`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${sessionLockKey}))`;
+
+    const sessionByLocalId = localSessionId
+      ? await tx.callSession.findFirst({
+          where: {
+            companyPhoneId: companyPhone.id,
+            localSessionId,
+            deletedAt: null,
+            isArchived: false,
+          },
+          include: { lead: true },
+          orderBy: { firstRingAt: "desc" },
+        })
+      : null;
+    const latestOpenSession =
+      sessionByLocalId ??
+      (await tx.callSession.findFirst(
+        findOpenSessionArgs({
+          companyPhoneId: companyPhone.id,
+          callerNumber,
+          localSessionId,
+        }),
+      ));
     const recentRecoverableSession =
       !latestOpenSession &&
       callerNumber &&
@@ -362,6 +383,8 @@ export async function ingestCallEvent(input: CallTrackerEventInput) {
               companyPhoneId: companyPhone.id,
               callerNumber,
               status: "MISSED",
+              deletedAt: null,
+              isArchived: false,
               firstRingAt: {
                 gte: new Date(input.occurredAt.getTime() - 5 * 60 * 1000),
               },
@@ -391,6 +414,11 @@ export async function ingestCallEvent(input: CallTrackerEventInput) {
       throw new Error("Caller number could not be resolved.");
     }
 
+    const existingLead = await tx.callLead.findUnique({
+      where: { phone: effectiveCallerNumber },
+      select: { id: true },
+    });
+
     const lead = await tx.callLead.upsert({
       where: { phone: effectiveCallerNumber },
       update: {
@@ -406,6 +434,21 @@ export async function ingestCallEvent(input: CallTrackerEventInput) {
         lastCompanyPhone: companyPhone.phoneNumber,
       },
     });
+
+    if (!existingLead) {
+      await tx.callActivity.create({
+        data: {
+          leadId: lead.id,
+          actionType: "CALL_CREATED",
+          description: `Call lead created for incoming caller ${effectiveCallerNumber}`,
+          metadata: {
+            companyPhone: companyPhone.phoneNumber,
+            caller: effectiveCallerNumber,
+            localContactName: cleanText(input.localContactName),
+          },
+        },
+      });
+    }
 
     const openSession =
       latestOpenSession?.callerNumber === effectiveCallerNumber
@@ -431,9 +474,7 @@ export async function ingestCallEvent(input: CallTrackerEventInput) {
         ? input.occurredAt
         : existingAnsweredAt || inferredAnsweredAt;
     const endedAt =
-      input.eventType === "RINGING" || input.eventType === "ANSWERED"
-        ? null
-        : input.eventType === "ENDED" || input.eventType === "MISSED"
+      input.eventType === "ENDED" || input.eventType === "MISSED"
           ? input.occurredAt
           : openSession?.endedAt ?? null;
     const durationSeconds =
@@ -443,10 +484,16 @@ export async function ingestCallEvent(input: CallTrackerEventInput) {
         : endedAt && openSession && input.eventType === "ENDED"
           ? Math.max(0, Math.round((endedAt.getTime() - openSession.firstRingAt.getTime()) / 1000))
           : null);
-    const status = sessionStatusForEvent(
+    const eventStatus = sessionStatusForEvent(
       input.eventType,
       Boolean(answeredAt || (durationSeconds && durationSeconds > 0)),
     );
+    const status =
+      openSession?.endedAt && (input.eventType === "RINGING" || input.eventType === "ANSWERED")
+        ? answeredAt
+          ? ("COMPLETED" as const)
+          : openSession.status
+        : eventStatus;
 
     const session = openSession
       ? await tx.callSession.update({
@@ -556,6 +603,37 @@ export async function ingestCallEvent(input: CallTrackerEventInput) {
     };
   });
 
+  let txResult: Awaited<ReturnType<typeof runTransaction>>;
+
+  try {
+    txResult = await runTransaction();
+  } catch (error) {
+    if (hasPrismaCode(error, "P2002")) {
+      const concurrentDuplicate = await db.callEvent.findUnique({
+        where: { eventId: input.eventId },
+        select: { id: true, sessionId: true },
+      });
+
+      if (concurrentDuplicate) {
+        await updateCompanyPhoneHealth(companyPhone.id, {
+          ...input,
+          lastSyncAttemptAt: input.lastSyncAttemptAt || new Date(),
+          lastSuccessfulSyncAt: input.lastSuccessfulSyncAt || new Date(),
+          lastSyncError: input.lastSyncError === undefined ? null : input.lastSyncError,
+          lastSyncErrorAt: input.lastSyncErrorAt === undefined ? null : input.lastSyncErrorAt,
+        });
+
+        return {
+          duplicate: true as const,
+          eventId: concurrentDuplicate.id,
+          sessionId: concurrentDuplicate.sessionId,
+        };
+      }
+    }
+
+    throw error;
+  }
+
   // Auto-queue a WhatsApp reply when the incoming call finishes (either ENDED or MISSED).
   // Runs AFTER the transaction so a WhatsApp failure never rolls back call data.
   // autoQueueWhatsAppForCaller contains safety checks to prevent duplicate queueing/spamming.
@@ -568,7 +646,15 @@ export async function ingestCallEvent(input: CallTrackerEventInput) {
   ) {
     try {
       const callState = txResult.status === "COMPLETED" ? "ANSWERED" : "MISSED";
-      await autoQueueWhatsAppForCaller(txResult.callerPhone, txResult.callerDisplayName, callState);
+      console.log(
+        `[call-tracker] Auto-queuing WhatsApp for ${txResult.callerPhone} (${callState}) — triggered by company phone ${companyPhoneNumber}`,
+      );
+      await autoQueueWhatsAppForCaller(
+        txResult.callerPhone,
+        txResult.callerDisplayName,
+        callState,
+        txResult.leadId,
+      );
     } catch (err) {
       console.error("[call-tracker] WhatsApp auto-queue error:", err);
     }

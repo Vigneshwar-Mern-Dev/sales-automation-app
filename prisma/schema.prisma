@@ -29,6 +29,7 @@ enum TaskPriority {
 enum LeadSource {
   WEBSITE
   INSTAGRAM
+  CALLS
 }
 
 enum LeadStage {
@@ -97,6 +98,14 @@ enum CallActivityType {
   ASSIGNMENT_CHANGE
   NOTE_ADDED
   FOLLOW_UP_UPDATE
+  WHATSAPP_QUEUED
+  WHATSAPP_SENDING
+  WHATSAPP_SENT
+  WHATSAPP_OPENED
+  WHATSAPP_FAILED
+  FORM_STARTED
+  FORM_SUBMITTED
+  ARCHIVED
 }
 
 enum WhatsAppConnectionStatus {
@@ -112,19 +121,52 @@ enum WhatsAppLeadStatus {
   NEW
   OPTED_IN
   QUEUED
+  SENDING
   SENT
+  OPENED
+  FORM_STARTED
+  FORM_SUBMITTED
+  ASSIGNED
+  FOLLOW_UP
+  INTERESTED
+  CONVERTED
   FAILED
+  EXPIRED
+  CANCELLED
   REPLIED
   DO_NOT_CONTACT
 }
 
+enum WhatsAppQueueStatus {
+  NEW
+  QUEUED
+  SENDING
+  SENT
+  OPENED
+  FORM_STARTED
+  FORM_SUBMITTED
+  FAILED
+  EXPIRED
+  CANCELLED
+}
+
+enum FormSubmissionStatus {
+  OPENED
+  FORM_STARTED
+  FORM_SUBMITTED
+}
+
 model User {
-  id           String @id @default(cuid())
-  username     String @map("name")
-  email        String @unique
-  passwordHash String @map("password")
-  role         Role   @default(USER)
-  department   String @default("Other")
+  id             String    @id @default(cuid())
+  username       String    @unique @map("name")
+  email          String    @unique
+  passwordHash   String    @map("password")
+  sessionVersion Int       @default(1) @map("session_version")
+  role           Role      @default(USER)
+  department     String    @default("Other")
+  isActive       Boolean   @default(true) @map("is_active")
+  deactivatedAt  DateTime? @map("deactivated_at")
+  deactivatedBy  String?   @map("deactivated_by")
 
   assignedTasks Task[]        @relation("AssignedTasks")
   createdTasks  Task[]        @relation("CreatedTasks")
@@ -152,8 +194,8 @@ model Task {
   assignedToId String
   assignedById String
 
-  assignedTo User          @relation("AssignedTasks", fields: [assignedToId], references: [id], onDelete: Cascade)
-  assignedBy User          @relation("CreatedTasks", fields: [assignedById], references: [id], onDelete: Cascade)
+  assignedTo User          @relation("AssignedTasks", fields: [assignedToId], references: [id], onDelete: Restrict)
+  assignedBy User          @relation("CreatedTasks", fields: [assignedById], references: [id], onDelete: Restrict)
   comments   TaskComment[]
 
   websiteLeadId String?      @map("website_lead_id")
@@ -182,7 +224,7 @@ model TaskComment {
   authorId String
 
   task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Restrict)
   createdAt DateTime @default(now())
 
   @@index([taskId])
@@ -305,27 +347,27 @@ model LeadActivity {
 }
 
 model CompanyPhone {
-  id            String    @id @default(cuid())
-  phoneNumber   String    @unique @map("phone_number")
-  label         String
-  deviceId      String    @unique @map("device_id")
-  authTokenHash String    @map("auth_token_hash")
-  lastSeenAt    DateTime? @map("last_seen_at")
-  isActive      Boolean   @default(true) @map("is_active")
-  appVersion    String?   @map("app_version")
-  androidVersion String?  @map("android_version")
-  deviceModel   String?   @map("device_model")
-  batteryPercent Int?     @map("battery_percent")
-  isCharging    Boolean?  @map("is_charging")
-  chargingType  String?   @map("charging_type")
-  networkType   String?   @map("network_type")
-  pendingSyncCount Int?   @map("pending_sync_count")
-  lastSyncAttemptAt DateTime? @map("last_sync_attempt_at")
+  id                   String    @id @default(cuid())
+  phoneNumber          String    @unique @map("phone_number")
+  label                String
+  deviceId             String    @unique @map("device_id")
+  authTokenHash        String    @map("auth_token_hash")
+  lastSeenAt           DateTime? @map("last_seen_at")
+  isActive             Boolean   @default(true) @map("is_active")
+  appVersion           String?   @map("app_version")
+  androidVersion       String?   @map("android_version")
+  deviceModel          String?   @map("device_model")
+  batteryPercent       Int?      @map("battery_percent")
+  isCharging           Boolean?  @map("is_charging")
+  chargingType         String?   @map("charging_type")
+  networkType          String?   @map("network_type")
+  pendingSyncCount     Int?      @map("pending_sync_count")
+  lastSyncAttemptAt    DateTime? @map("last_sync_attempt_at")
   lastSuccessfulSyncAt DateTime? @map("last_successful_sync_at")
-  lastSyncError String?   @map("last_sync_error") @db.Text
-  lastSyncErrorAt DateTime? @map("last_sync_error_at")
-  syncRetryCount Int?     @map("sync_retry_count")
-  permissionStatus Json?  @map("permission_status")
+  lastSyncError        String?   @map("last_sync_error") @db.Text
+  lastSyncErrorAt      DateTime? @map("last_sync_error_at")
+  syncRetryCount       Int?      @map("sync_retry_count")
+  permissionStatus     Json?     @map("permission_status")
 
   events   CallEvent[]
   sessions CallSession[]
@@ -340,34 +382,42 @@ model CompanyPhone {
 }
 
 model CallLead {
-  id              String         @id @default(cuid())
-  phone           String         @unique
-  displayName     String         @map("display_name")
-  email           String?
-  localContactName String?       @map("local_contact_name")
-  city            String?
-  address         String?        @db.Text
-  ownershipType   String?        @map("ownership_type")
-  provider        String?
-  language        String?
-  message         String?        @db.Text
-  status          CallLeadStatus @default(NEW)
-  assignedToId    String?        @map("assigned_to_id")
-  assignedTo      User?          @relation("CallLeads", fields: [assignedToId], references: [id], onDelete: SetNull)
-  firstCompanyPhone String?      @map("first_company_phone")
-  lastCompanyPhone  String?      @map("last_company_phone")
-  lastContactedAt DateTime?      @map("last_contacted_at")
-  nextFollowUpAt  DateTime?      @map("next_follow_up_at")
-  instagramLeadId String?        @map("instagram_lead_id")
-  sheetSyncedAt   DateTime?      @map("sheet_synced_at")
-  sheetSyncWarning String?       @map("sheet_sync_warning") @db.Text
-  notes           String?        @db.Text
-  isImportant     Boolean        @default(false) @map("is_important")
-  locationSent    Boolean        @default(false) @map("location_sent")
+  id                String         @id @default(cuid())
+  phone             String         @unique
+  displayName       String         @map("display_name")
+  email             String?
+  localContactName  String?        @map("local_contact_name")
+  city              String?
+  address           String?        @db.Text
+  ownershipType     String?        @map("ownership_type")
+  provider          String?
+  language          String?
+  message           String?        @db.Text
+  status            CallLeadStatus @default(NEW)
+  assignedToId      String?        @map("assigned_to_id")
+  assignedTo        User?          @relation("CallLeads", fields: [assignedToId], references: [id], onDelete: SetNull)
+  firstCompanyPhone String?        @map("first_company_phone")
+  lastCompanyPhone  String?        @map("last_company_phone")
+  lastContactedAt   DateTime?      @map("last_contacted_at")
+  nextFollowUpAt    DateTime?      @map("next_follow_up_at")
+  instagramLeadId   String?        @map("instagram_lead_id")
+  sheetSyncedAt     DateTime?      @map("sheet_synced_at")
+  sheetSyncWarning  String?        @map("sheet_sync_warning") @db.Text
+  notes             String?        @db.Text
+  isImportant       Boolean        @default(false) @map("is_important")
+  locationSent      Boolean        @default(false) @map("location_sent")
 
-  sessions   CallSession[]
-  activities CallActivity[]
-  followUps  CallFollowUp[]
+  sessions           CallSession[]
+  activities         CallActivity[]
+  followUps          CallFollowUp[]
+  whatsappQueueItems WhatsAppQueueItem[]
+  formSubmissions    FormSubmission[]
+
+  deletedAt  DateTime? @map("deleted_at")
+  deletedBy  String?   @map("deleted_by")
+  isArchived Boolean   @default(false) @map("is_archived")
+  archivedAt DateTime? @map("archived_at")
+  archivedBy String?   @map("archived_by")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -381,29 +431,36 @@ model CallLead {
   @@index([instagramLeadId])
   @@index([isImportant])
   @@index([locationSent])
+  @@index([isArchived])
+  @@index([deletedAt])
 }
 
 model CallEvent {
-  id             String        @id @default(cuid())
-  eventId        String        @unique @map("event_id")
-  localSessionId String?       @map("local_session_id")
-  companyPhoneId String        @map("company_phone_id")
-  companyPhone   CompanyPhone  @relation(fields: [companyPhoneId], references: [id], onDelete: Cascade)
-  sessionId      String?       @map("session_id")
-  session        CallSession?  @relation(fields: [sessionId], references: [id], onDelete: SetNull)
-  callerNumber   String        @map("caller_number")
-  eventType      CallEventType @map("event_type")
-  callDirection  CallDirection @default(INCOMING) @map("call_direction")
-  occurredAt     DateTime      @map("occurred_at")
-  receivedAt     DateTime      @default(now()) @map("received_at")
-  durationSeconds Int?         @map("duration_seconds")
-  retryCount      Int?         @map("retry_count")
-  simSlot         Int?         @map("sim_slot")
-  simDisplayName  String?      @map("sim_display_name")
-  simCarrierName  String?      @map("sim_carrier_name")
-  simSubscriptionId String?    @map("sim_subscription_id")
-  localContactName String?     @map("local_contact_name")
-  rawPayload     Json          @map("raw_payload")
+  id                String        @id @default(cuid())
+  eventId           String        @unique @map("event_id")
+  localSessionId    String?       @map("local_session_id")
+  companyPhoneId    String        @map("company_phone_id")
+  companyPhone      CompanyPhone  @relation(fields: [companyPhoneId], references: [id], onDelete: Restrict)
+  sessionId         String?       @map("session_id")
+  session           CallSession?  @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  callerNumber      String        @map("caller_number")
+  eventType         CallEventType @map("event_type")
+  callDirection     CallDirection @default(INCOMING) @map("call_direction")
+  occurredAt        DateTime      @map("occurred_at")
+  receivedAt        DateTime      @default(now()) @map("received_at")
+  durationSeconds   Int?          @map("duration_seconds")
+  retryCount        Int?          @map("retry_count")
+  simSlot           Int?          @map("sim_slot")
+  simDisplayName    String?       @map("sim_display_name")
+  simCarrierName    String?       @map("sim_carrier_name")
+  simSubscriptionId String?       @map("sim_subscription_id")
+  localContactName  String?       @map("local_contact_name")
+  rawPayload        Json          @map("raw_payload")
+  deletedAt         DateTime?     @map("deleted_at")
+  deletedBy         String?       @map("deleted_by")
+  isArchived        Boolean       @default(false) @map("is_archived")
+  archivedAt        DateTime?     @map("archived_at")
+  archivedBy        String?       @map("archived_by")
 
   @@index([companyPhoneId])
   @@index([sessionId])
@@ -412,33 +469,40 @@ model CallEvent {
   @@index([eventType])
   @@index([occurredAt])
   @@index([simSlot], map: "CallEvent_sim_slot_idx")
+  @@index([isArchived])
+  @@index([deletedAt])
 }
 
 model CallSession {
-  id             String            @id @default(cuid())
-  localSessionId String?           @map("local_session_id")
-  companyPhoneId String            @map("company_phone_id")
-  companyPhone   CompanyPhone      @relation(fields: [companyPhoneId], references: [id], onDelete: Cascade)
-  callerNumber   String            @map("caller_number")
-  leadId         String            @map("lead_id")
-  lead           CallLead          @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  status         CallSessionStatus @default(RINGING)
-  callDirection  CallDirection     @default(INCOMING) @map("call_direction")
-  firstRingAt    DateTime          @map("first_ring_at")
-  answeredAt     DateTime?         @map("answered_at")
-  endedAt        DateTime?         @map("ended_at")
-  durationSeconds Int?             @map("duration_seconds")
-  androidCallLogId String?         @map("android_call_log_id")
-  simSlot        Int?              @map("sim_slot")
-  simDisplayName String?           @map("sim_display_name")
-  simCarrierName String?           @map("sim_carrier_name")
-  simSubscriptionId String?         @map("sim_subscription_id")
-  localContactName String?         @map("local_contact_name")
-  assignedToId   String?           @map("assigned_to_id")
-  assignedTo     User?             @relation("CallSessions", fields: [assignedToId], references: [id], onDelete: SetNull)
+  id                String            @id @default(cuid())
+  localSessionId    String?           @map("local_session_id")
+  companyPhoneId    String            @map("company_phone_id")
+  companyPhone      CompanyPhone      @relation(fields: [companyPhoneId], references: [id], onDelete: Restrict)
+  callerNumber      String            @map("caller_number")
+  leadId            String            @map("lead_id")
+  lead              CallLead          @relation(fields: [leadId], references: [id], onDelete: Restrict)
+  status            CallSessionStatus @default(RINGING)
+  callDirection     CallDirection     @default(INCOMING) @map("call_direction")
+  firstRingAt       DateTime          @map("first_ring_at")
+  answeredAt        DateTime?         @map("answered_at")
+  endedAt           DateTime?         @map("ended_at")
+  durationSeconds   Int?              @map("duration_seconds")
+  androidCallLogId  String?           @map("android_call_log_id")
+  simSlot           Int?              @map("sim_slot")
+  simDisplayName    String?           @map("sim_display_name")
+  simCarrierName    String?           @map("sim_carrier_name")
+  simSubscriptionId String?           @map("sim_subscription_id")
+  localContactName  String?           @map("local_contact_name")
+  assignedToId      String?           @map("assigned_to_id")
+  assignedTo        User?             @relation("CallSessions", fields: [assignedToId], references: [id], onDelete: SetNull)
 
   events     CallEvent[]
   activities CallActivity[]
+  deletedAt  DateTime?      @map("deleted_at")
+  deletedBy  String?        @map("deleted_by")
+  isArchived Boolean        @default(false) @map("is_archived")
+  archivedAt DateTime?      @map("archived_at")
+  archivedBy String?        @map("archived_by")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -455,12 +519,14 @@ model CallSession {
   @@index([assignedToId, firstRingAt])
   @@index([firstRingAt])
   @@index([simSlot], map: "CallSession_sim_slot_idx")
+  @@index([isArchived])
+  @@index([deletedAt])
 }
 
 model CallActivity {
   id          String           @id @default(cuid())
   leadId      String           @map("lead_id")
-  lead        CallLead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  lead        CallLead         @relation(fields: [leadId], references: [id], onDelete: Restrict)
   sessionId   String?          @map("session_id")
   session     CallSession?     @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   actionType  CallActivityType @map("action_type")
@@ -468,6 +534,11 @@ model CallActivity {
   userId      String?          @map("user_id")
   user        User?            @relation("CallActivities", fields: [userId], references: [id], onDelete: SetNull)
   metadata    Json?
+  deletedAt   DateTime?        @map("deleted_at")
+  deletedBy   String?          @map("deleted_by")
+  isArchived  Boolean          @default(false) @map("is_archived")
+  archivedAt  DateTime?        @map("archived_at")
+  archivedBy  String?          @map("archived_by")
 
   createdAt DateTime @default(now()) @map("created_at")
 
@@ -478,17 +549,24 @@ model CallActivity {
   @@index([userId, createdAt])
   @@index([userId, actionType, createdAt])
   @@index([actionType])
+  @@index([isArchived])
+  @@index([deletedAt])
 }
 
 model CallFollowUp {
-  id           String   @id @default(cuid())
-  leadId       String   @map("lead_id")
-  lead         CallLead @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  assignedToId String?  @map("assigned_to_id")
-  assignedTo   User?    @relation("CallFollowUps", fields: [assignedToId], references: [id], onDelete: SetNull)
-  dueAt        DateTime @map("due_at")
+  id           String    @id @default(cuid())
+  leadId       String    @map("lead_id")
+  lead         CallLead  @relation(fields: [leadId], references: [id], onDelete: Restrict)
+  assignedToId String?   @map("assigned_to_id")
+  assignedTo   User?     @relation("CallFollowUps", fields: [assignedToId], references: [id], onDelete: SetNull)
+  dueAt        DateTime  @map("due_at")
   completedAt  DateTime? @map("completed_at")
-  note         String?  @db.Text
+  note         String?   @db.Text
+  deletedAt    DateTime? @map("deleted_at")
+  deletedBy    String?   @map("deleted_by")
+  isArchived   Boolean   @default(false) @map("is_archived")
+  archivedAt   DateTime? @map("archived_at")
+  archivedBy   String?   @map("archived_by")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -498,67 +576,211 @@ model CallFollowUp {
   @@index([assignedToId, completedAt])
   @@index([dueAt])
   @@index([completedAt])
+  @@index([isArchived])
+  @@index([deletedAt])
 }
 
 model WhatsAppAccount {
-  id              String                   @id @default(cuid())
-  label           String                   @default("Primary WhatsApp")
-  phoneNumber     String?                  @map("phone_number")
-  status          WhatsAppConnectionStatus @default(DISCONNECTED)
-  qrCodeData      String?                  @map("qr_code_data") @db.Text
-  minDelaySeconds Int                      @default(45) @map("min_delay_seconds")
-  maxDelaySeconds Int                      @default(120) @map("max_delay_seconds")
-  dailySendLimit  Int                      @default(100) @map("daily_send_limit")
-  requireOptIn    Boolean                  @default(true) @map("require_opt_in")
-  quietHoursStart String                   @default("21:00") @map("quiet_hours_start")
-  quietHoursEnd   String                   @default("09:00") @map("quiet_hours_end")
-  messageVariants      String?                  @map("message_variants") @db.Text
-  autoReplyEnabled     Boolean                  @default(true)  @map("auto_reply_enabled")
-  consecutiveFailures  Int                      @default(0)     @map("consecutive_failures")
-  autoPauseThreshold   Int                      @default(3)     @map("auto_pause_threshold")
-  contactCooldownDays  Int                      @default(7)     @map("contact_cooldown_days")
-  hourlySendLimit      Int                      @default(10)    @map("hourly_send_limit")
-  warmupEnabled        Boolean                  @default(false) @map("warmup_enabled")
-  warmupStartDate      DateTime?                @map("warmup_start_date")
-  warmupRampPerDay     Int                      @default(5)     @map("warmup_ramp_per_day")
-  lastConnectedAt      DateTime?                @map("last_connected_at")
-  lastError       String?                  @map("last_error") @db.Text
-  leads           WhatsAppLead[]
+  id                  String                   @id @default(cuid())
+  label               String                   @default("Primary WhatsApp")
+  phoneNumber         String?                  @map("phone_number")
+  status              WhatsAppConnectionStatus @default(DISCONNECTED)
+  qrCodeData          String?                  @map("qr_code_data") @db.Text
+  minDelaySeconds     Int                      @default(45) @map("min_delay_seconds")
+  maxDelaySeconds     Int                      @default(120) @map("max_delay_seconds")
+  dailySendLimit      Int                      @default(100) @map("daily_send_limit")
+  requireOptIn        Boolean                  @default(true) @map("require_opt_in")
+  quietHoursStart     String                   @default("21:00") @map("quiet_hours_start")
+  quietHoursEnd       String                   @default("09:00") @map("quiet_hours_end")
+  messageVariants     String?                  @map("message_variants") @db.Text
+  autoReplyEnabled    Boolean                  @default(true) @map("auto_reply_enabled")
+  consecutiveFailures Int                      @default(0) @map("consecutive_failures")
+  autoPauseThreshold  Int                      @default(3) @map("auto_pause_threshold")
+  contactCooldownDays Int                      @default(7) @map("contact_cooldown_days")
+  hourlySendLimit     Int                      @default(10) @map("hourly_send_limit")
+  warmupEnabled       Boolean                  @default(false) @map("warmup_enabled")
+  warmupStartDate     DateTime?                @map("warmup_start_date")
+  warmupRampPerDay    Int                      @default(5) @map("warmup_ramp_per_day")
+  lastConnectedAt     DateTime?                @map("last_connected_at")
+  lastAssignedAt      DateTime?                @map("last_assigned_at")
+  lastHeartbeatAt     DateTime?                @map("last_heartbeat_at")
+  lastError           String?                  @map("last_error") @db.Text
+  leads               WhatsAppLead[]
+  preferredByLeads    WhatsAppLead[]            @relation("PreferredAccount")
+  queueItems          WhatsAppQueueItem[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([status])
+  @@index([lastAssignedAt])
 }
 
 model WhatsAppLead {
-  id          String             @id @default(cuid())
-  accountId   String?            @map("account_id")
-  account     WhatsAppAccount?   @relation(fields: [accountId], references: [id], onDelete: SetNull)
-  phone       String
-  displayName String             @map("display_name")
-  message     String?            @db.Text
-  status      WhatsAppLeadStatus @default(NEW)
-  consentAt        DateTime?          @map("consent_at")
-  lastSentAt       DateTime?          @map("last_sent_at")
-  lastError        String?            @map("last_error") @db.Text
-  lastReplyAt      DateTime?          @map("last_reply_at")
-  lastReplySnippet String?            @map("last_reply_snippet") @db.Text
+  id                 String              @id @default(cuid())
+  accountId          String?             @map("account_id")
+  account            WhatsAppAccount?    @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  preferredAccountId String?             @map("preferred_account_id")
+  preferredAccount   WhatsAppAccount?    @relation("PreferredAccount", fields: [preferredAccountId], references: [id], onDelete: SetNull)
+  phone              String
+  displayName      String              @map("display_name")
+  message          String?             @db.Text
+  status           WhatsAppLeadStatus  @default(NEW)
+  consentAt        DateTime?           @map("consent_at")
+  lastSentAt       DateTime?           @map("last_sent_at")
+  lastError        String?             @map("last_error") @db.Text
+  lastReplyAt      DateTime?           @map("last_reply_at")
+  lastReplySnippet String?             @map("last_reply_snippet") @db.Text
+  queueItems       WhatsAppQueueItem[]
+  formSubmissions  FormSubmission[]
 
-  formToken        String?            @unique @default(uuid()) @map("form_token")
-  formSubmittedAt  DateTime?          @map("form_submitted_at")
-  formName         String?            @map("form_name")
-  formCity         String?            @map("form_city")
-  formPropertyType String?            @map("form_property_type")
-  formMapsLocation String?            @map("form_maps_location") @db.Text
+  formToken        String?   @unique @default(uuid()) @map("form_token")
+  formOpenedAt     DateTime? @map("form_opened_at")
+  formStartedAt    DateTime? @map("form_started_at")
+  formSubmittedAt  DateTime? @map("form_submitted_at")
+  formName         String?   @map("form_name")
+  formCity         String?   @map("form_city")
+  formPropertyType String?   @map("form_property_type")
+  formMapsLocation String?   @map("form_maps_location") @db.Text
+  deletedAt        DateTime? @map("deleted_at")
+  deletedBy        String?   @map("deleted_by")
+  isArchived       Boolean   @default(false) @map("is_archived")
+  archivedAt       DateTime? @map("archived_at")
+  archivedBy       String?   @map("archived_by")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([accountId])
+  @@index([preferredAccountId])
   @@index([status])
   @@index([phone])
   @@index([createdAt])
   @@index([lastSentAt])
   @@index([lastReplyAt])
+  @@index([isArchived])
+  @@index([deletedAt])
+}
+
+model WhatsAppQueueItem {
+  id                String              @id @default(cuid())
+  accountId         String?             @map("account_id")
+  account           WhatsAppAccount?    @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  whatsappLeadId    String              @map("whatsapp_lead_id")
+  whatsappLead      WhatsAppLead        @relation(fields: [whatsappLeadId], references: [id], onDelete: Restrict)
+  callLeadId        String?             @map("call_lead_id")
+  callLead          CallLead?           @relation(fields: [callLeadId], references: [id], onDelete: SetNull)
+  phone             String
+  displayName       String              @map("display_name")
+  message           String?             @db.Text
+  status            WhatsAppQueueStatus @default(QUEUED)
+  formToken         String              @default(uuid()) @map("form_token")
+  claimExpiresAt    DateTime?           @map("claim_expires_at")
+  attemptCount      Int                 @default(0) @map("attempt_count")
+  providerMessageId String?             @unique @map("provider_message_id")
+  queuedAt          DateTime            @default(now()) @map("queued_at")
+  sendAfterAt       DateTime            @default(now()) @map("send_after_at")
+  sendingAt         DateTime?           @map("sending_at")
+  sentAt            DateTime?           @map("sent_at")
+  openedAt          DateTime?           @map("opened_at")
+  formStartedAt     DateTime?           @map("form_started_at")
+  formSubmittedAt   DateTime?           @map("form_submitted_at")
+  failedAt          DateTime?           @map("failed_at")
+  expiredAt         DateTime?           @map("expired_at")
+  cancelledAt       DateTime?           @map("cancelled_at")
+  lastError         String?             @map("last_error") @db.Text
+  deletedAt         DateTime?           @map("deleted_at")
+  deletedBy         String?             @map("deleted_by")
+  isArchived        Boolean             @default(false) @map("is_archived")
+  archivedAt        DateTime?           @map("archived_at")
+  archivedBy        String?             @map("archived_by")
+
+  formSubmissions FormSubmission[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([accountId])
+  @@index([whatsappLeadId])
+  @@index([callLeadId])
+  @@index([phone])
+  @@index([status])
+  @@index([claimExpiresAt])
+  @@index([queuedAt])
+  @@index([accountId, status, sendAfterAt])
+  @@index([sentAt])
+  @@index([isArchived])
+  @@index([deletedAt])
+}
+
+model FormSubmission {
+  id             String               @id @default(cuid())
+  whatsappLeadId String?              @map("whatsapp_lead_id")
+  whatsappLead   WhatsAppLead?        @relation(fields: [whatsappLeadId], references: [id], onDelete: SetNull)
+  queueItemId    String?              @map("queue_item_id")
+  queueItem      WhatsAppQueueItem?   @relation(fields: [queueItemId], references: [id], onDelete: SetNull)
+  callLeadId     String?              @map("call_lead_id")
+  callLead       CallLead?            @relation(fields: [callLeadId], references: [id], onDelete: SetNull)
+  formToken      String               @unique @map("form_token")
+  phone          String
+  status         FormSubmissionStatus @default(OPENED)
+  openedAt       DateTime?            @map("opened_at")
+  startedAt      DateTime?            @map("started_at")
+  submittedAt    DateTime?            @map("submitted_at")
+  submittedBy    String?              @map("submitted_by")
+  ipAddress      String?              @map("ip_address")
+  userAgent      String?              @map("user_agent") @db.Text
+  browser        String?
+  version        String?
+  name           String?
+  city           String?
+  propertyType   String?              @map("property_type")
+  mapsLocation   String?              @map("maps_location") @db.Text
+  rawPayload     Json?                @map("raw_payload")
+  deletedAt      DateTime?            @map("deleted_at")
+  deletedBy      String?              @map("deleted_by")
+  isArchived     Boolean              @default(false) @map("is_archived")
+  archivedAt     DateTime?            @map("archived_at")
+  archivedBy     String?              @map("archived_by")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([whatsappLeadId])
+  @@index([queueItemId])
+  @@index([callLeadId])
+  @@index([phone])
+  @@index([status])
+  @@index([openedAt])
+  @@index([submittedAt])
+  @@index([isArchived])
+  @@index([deletedAt])
+}
+
+model LoginAttempt {
+  id            String    @id @default(cuid())
+  identifier    String    @unique
+  ipAddress     String?   @map("ip_address")
+  failedCount   Int       @default(0) @map("failed_count")
+  firstFailedAt DateTime  @default(now()) @map("first_failed_at")
+  lastFailedAt  DateTime  @default(now()) @map("last_failed_at")
+  lockedUntil   DateTime? @map("locked_until")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([lockedUntil])
+  @@map("login_attempts")
+}
+
+model RateLimitBucket {
+  key             String    @id
+  count           Int       @default(0)
+  windowStartedAt DateTime  @map("window_started_at")
+  blockedUntil    DateTime? @map("blocked_until")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  @@index([updatedAt])
+  @@map("rate_limit_buckets")
 }

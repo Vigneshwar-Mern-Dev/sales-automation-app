@@ -11,9 +11,13 @@ export async function GET() {
     where: {
       status: { in: ["RINGING", "ANSWERED"] },
       endedAt: null,
+      deletedAt: null,
+      isArchived: false,
+      lead: { is: { deletedAt: null, isArchived: false } },
       OR: [
         { assignedToId: user.id },
         { lead: { assignedToId: user.id } },
+        { lead: { assignedToId: null } },
       ],
     },
     include: {
@@ -39,5 +43,8 @@ export async function GET() {
     orderBy: { firstRingAt: "desc" },
   });
 
-  return NextResponse.json({ ok: true, serverTime: new Date().toISOString(), calls });
+  return NextResponse.json(
+    { ok: true, serverTime: new Date().toISOString(), calls },
+    { headers: { "Cache-Control": "no-store" } },
+  );
 }

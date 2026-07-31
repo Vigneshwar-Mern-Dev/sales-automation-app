@@ -229,7 +229,7 @@ export function CallbacksPage({
 
   return (
     <div className="space-y-5 pb-8">
-      <PageHeader description="Use this single queue for call alerts and callbacks. Ringing calls auto-expire after 30 seconds and move into missed calls." title="Callback queue" />
+      <PageHeader description="Use this single queue for call alerts and callbacks. Stale ringing sessions auto-expire after 2 minutes and move into missed calls." title="Callback queue" />
       <CallCenterTabs />
 
       {error ? (
@@ -245,13 +245,13 @@ export function CallbacksPage({
 
       <section className="grid gap-3 sm:grid-cols-4">
         <StatCard detail="Ringing or connected now" label="Live alerts" tone={activeCalls.length ? "emerald" : "cyan"} value={activeCalls.length} />
-        <StatCard detail="Auto-moves to callbacks after 30 sec" label="Ringing" tone={ringingCount ? "rose" : "cyan"} value={ringingCount} />
+        <StatCard detail="Stale after 2 minutes" label="Ringing" tone={ringingCount ? "rose" : "cyan"} value={ringingCount} />
         <StatCard detail="Open missed-call sessions" label="Missed callbacks" tone="rose" value={calls.length} />
         <StatCard detail="Distinct people waiting" label="Unique callers" value={uniqueCallerCount} />
       </section>
 
       <Panel>
-        <PanelTitle description="This is for intimation only. Calls that keep ringing for 30 seconds become missed callbacks automatically." title="Live call alerts" />
+        <PanelTitle description="This is for intimation only. Calls with no final device outcome for 2 minutes become missed callbacks automatically." title="Live call alerts" />
         <div className="overflow-x-auto">
           <div className="min-w-[980px]">
             <div className="grid grid-cols-[1.2fr_1fr_1fr_0.75fr_1fr_auto] gap-3 border-b border-white/10 px-5 py-3 text-xs font-bold text-slate-400">
@@ -265,7 +265,7 @@ export function CallbacksPage({
             <div className="divide-y divide-white/10">
               {activeCalls.map((call) => {
                 const ringAgeSeconds = Math.max(0, Math.floor((renderedAt - new Date(call.firstRingAt).getTime()) / 1000));
-                const secondsLeft = call.status === "RINGING" ? Math.max(0, 30 - ringAgeSeconds) : null;
+                const secondsLeft = call.status === "RINGING" ? Math.max(0, 120 - ringAgeSeconds) : null;
                 const newLead = isNewLead(call.lead, renderedAt);
 
                 return (

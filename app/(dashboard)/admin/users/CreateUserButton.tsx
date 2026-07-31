@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { adminCreateUserAction } from "@/app/lib/admin-actions";
+import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, passwordPolicyError } from "@/app/lib/password-policy";
 
 export function CreateUserButton() {
   const [isOpen, setIsOpen] = useState(false);
@@ -37,8 +38,9 @@ export function CreateUserButton() {
       return;
     }
 
-    if (password.length < 8) {
-      setError("Password must be at least 8 characters long.");
+    const policyError = passwordPolicyError(password);
+    if (policyError) {
+      setError(policyError);
       setIsLoading(false);
       return;
     }
@@ -211,7 +213,9 @@ export function CreateUserButton() {
                       disabled={isLoading}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      placeholder="At least 8 characters"
+                      minLength={PASSWORD_MIN_LENGTH}
+                      maxLength={PASSWORD_MAX_LENGTH}
+                      placeholder={`At least ${PASSWORD_MIN_LENGTH} characters`}
                       className="w-full rounded-lg border border-white/10 bg-white/[0.03] pl-3 pr-10 py-2 text-sm text-white placeholder-slate-500 transition focus:border-cyan-400 focus:bg-white/[0.06] focus:outline-none"
                     />
                     <button

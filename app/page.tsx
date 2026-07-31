@@ -183,6 +183,7 @@ export default function Home() {
             <span className="font-semibold tracking-wide text-gray-300 transition-colors duration-300 hover:text-white">
               vigneshwar
             </span>
+            
           </p>
 
         </div>

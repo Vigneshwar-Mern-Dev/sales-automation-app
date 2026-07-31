@@ -15,6 +15,22 @@ import {
   formatDuration,
 } from "./call-ui";
 
+type AssignedGroupCount = {
+  assignedToId: string | null;
+  _count: { _all: number };
+};
+
+type UserGroupCount = {
+  userId: string | null;
+  _count: { _all: number };
+};
+
+type AssignedSessionSummary = {
+  assignedToId: string | null;
+  lead: { assignedToId: string | null } | null;
+  status?: string;
+};
+
 export default async function AdminCallCenterPage() {
   await expireStaleRingingCalls();
 
@@ -112,7 +128,7 @@ export default async function AdminCallCenterPage() {
         },
       }),
       db.user.findMany({
-        where: { role: "USER" },
+        where: { role: "USER", isActive: true },
         orderBy: { username: "asc" },
         select: { id: true, username: true, email: true },
       }),
@@ -219,37 +235,37 @@ export default async function AdminCallCenterPage() {
     ]);
 
   // Helpers to fetch grouped counts
-  const getGroupCount = (group: { assignedToId: string | null; _count: { _all: number } }[], agentId: string) => {
+  const getGroupCount = (group: readonly AssignedGroupCount[], agentId: string) => {
     return group.find((g) => g.assignedToId === agentId)?._count._all ?? 0;
   };
-  const getUserGroupCount = (group: { userId: string | null; _count: { _all: number } }[], agentId: string) => {
+  const getUserGroupCount = (group: readonly UserGroupCount[], agentId: string) => {
     return group.find((g) => g.userId === agentId)?._count._all ?? 0;
   };
 
   // Memory filtering functions for callSessions matching assignedFilter
-  const matchesAssignedFilter = (session: { assignedToId: string | null; lead: { assignedToId: string | null } | null }, agentId: string) => {
+  const matchesAssignedFilter = (session: AssignedSessionSummary, agentId: string) => {
     return session.assignedToId === agentId || session.lead?.assignedToId === agentId;
   };
 
   const agentRows = await Promise.all(
     agents.map(async (agent) => {
-      const ownedLeads = getGroupCount(ownedLeadsGroup as any, agent.id);
-      const openLeads = getGroupCount(openLeadsGroup as any, agent.id);
-      const claimedToday = getUserGroupCount(claimedTodayGroup as any, agent.id);
-      const sheetSavedToday = getGroupCount(sheetSavedTodayGroup as any, agent.id);
-      const followUps = getGroupCount(followUpsGroup as any, agent.id);
-      const outcomesToday = getGroupCount(outcomesTodayGroup as any, agent.id);
-      const detailUpdatesToday = getUserGroupCount(detailUpdatesTodayGroup as any, agent.id);
-      const workflowUpdatesToday = getUserGroupCount(workflowUpdatesTodayGroup as any, agent.id);
+      const ownedLeads = getGroupCount(ownedLeadsGroup, agent.id);
+      const openLeads = getGroupCount(openLeadsGroup, agent.id);
+      const claimedToday = getUserGroupCount(claimedTodayGroup, agent.id);
+      const sheetSavedToday = getGroupCount(sheetSavedTodayGroup, agent.id);
+      const followUps = getGroupCount(followUpsGroup, agent.id);
+      const outcomesToday = getGroupCount(outcomesTodayGroup, agent.id);
+      const detailUpdatesToday = getUserGroupCount(detailUpdatesTodayGroup, agent.id);
+      const workflowUpdatesToday = getUserGroupCount(workflowUpdatesTodayGroup, agent.id);
 
       // In-memory calculations for session counts
-      const outgoingCallsToday = outgoingCallsTodayGroup.filter((s: any) => matchesAssignedFilter(s, agent.id)).length;
-      const completed = outgoingCallsTodayGroup.filter((s: any) => matchesAssignedFilter(s, agent.id) && s.status === "COMPLETED").length;
-      const live = liveSessionsGroup.filter((s: any) => matchesAssignedFilter(s, agent.id)).length;
-      const missed = missedSessionsGroup.filter((s: any) => matchesAssignedFilter(s, agent.id)).length;
+      const outgoingCallsToday = outgoingCallsTodayGroup.filter((session) => matchesAssignedFilter(session, agent.id)).length;
+      const completed = outgoingCallsTodayGroup.filter((session) => matchesAssignedFilter(session, agent.id) && session.status === "COMPLETED").length;
+      const live = liveSessionsGroup.filter((session) => matchesAssignedFilter(session, agent.id)).length;
+      const missed = missedSessionsGroup.filter((session) => matchesAssignedFilter(session, agent.id)).length;
 
       // Filter recent work for this agent
-      const recentWork = allRecentWork.filter((w: any) => w.userId === agent.id).slice(0, 5);
+      const recentWork = allRecentWork.filter((work) => work.userId === agent.id).slice(0, 5);
 
       // Fetch last session (this is a fast select)
       const lastSession = await db.callSession.findFirst({
@@ -509,7 +525,7 @@ export default async function AdminCallCenterPage() {
                       <div className="rounded-lg border border-white/10 bg-white/[0.02] p-4">
                         <h3 className="text-xs font-black uppercase tracking-[0.14em] text-cyan-100">Recent user activity</h3>
                         <div className="mt-3 space-y-3">
-                          {agent.recentWork.map((activity: any) => (
+                          {agent.recentWork.map((activity) => (
                             <div className="text-xs" key={activity.id}>
                               <p className="font-bold text-white">{activity.lead.displayName}</p>
                               <p className="mt-1 text-slate-500">{activity.description}</p>

@@ -83,6 +83,7 @@ async function getTaskData(status?: string, userId?: string) {
   try {
     const [users, tasks] = await Promise.all([
       db.user.findMany({
+        where: { isActive: true },
         orderBy: { username: "asc" },
         select: { id: true, username: true, email: true, role: true, department: true },
       }),

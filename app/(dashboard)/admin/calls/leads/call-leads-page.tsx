@@ -15,6 +15,17 @@ import {
 import { CallLeadStatus } from "@/app/lib/prisma-enums";
 import { CallCenterTabs, PageHeader, StatCard, StatusBadge, formatDuration } from "../call-ui";
 
+type FormSubmissionRow = {
+  id: string;
+  status: string;
+  submittedAt: Date | string | null;
+  name: string | null;
+  city: string | null;
+  propertyType: string | null;
+  mapsLocation: string | null;
+  formToken: string | null;
+};
+
 export type CallLeadRow = {
   id: string;
   phone: string;
@@ -72,6 +83,13 @@ export type CallLeadRow = {
     user?: { username: string } | null;
   }>;
   _count: { sessions: number; followUps: number };
+  // Form and WhatsApp visibility
+  hasSubmittedForm: boolean;
+  submittedFormData?: FormSubmissionRow | null;
+  formSubmission?: FormSubmissionRow | null;
+  whatsappStatus: string | null;
+  lastWhatsAppError: string | null;
+  formToken: string | null;
 };
 
 type Agent = { id: string; username: string; email: string; department?: string };
@@ -162,14 +180,42 @@ function directionLabel(direction: string | null | undefined) {
   return "--";
 }
 
+type QueueCounts = {
+  open: number;
+  followUp: number;
+  unassigned: number;
+  important: number;
+  filledForm: number;
+  synced: number;
+};
+
+type LeadQueue = "OPEN" | "FOLLOW_UP" | "UNASSIGNED" | "IMPORTANT" | "SYNCED" | "ALL";
+
+type Pagination = {
+  currentPage: number;
+  pageSize: number;
+  totalLeads: number;
+  totalPages: number;
+};
+
 export function CallLeadsPage({
   leads,
   agents,
+  filterFilledForm,
+  queueCounts,
   initialAgentId = "ALL",
+  initialQueue = "ALL",
+  initialSearch = "",
+  pagination,
 }: {
   leads: CallLeadRow[];
   agents: Agent[];
+  filterFilledForm: boolean;
+  queueCounts: QueueCounts;
   initialAgentId?: string;
+  initialQueue?: LeadQueue;
+  initialSearch?: string;
+  pagination: Pagination;
 }) {
   const router = useRouter();
   const [activeLead, setActiveLead] = useState<CallLeadRow | null>(null);
@@ -190,9 +236,7 @@ export function CallLeadsPage({
   const [workflowNotes, setWorkflowNotes] = useState("");
   const [workflowFollowUp, setWorkflowFollowUp] = useState("");
   const [workflowAssignee, setWorkflowAssignee] = useState("");
-  const [search, setSearch] = useState("");
-  const [queue, setQueue] = useState<"OPEN" | "FOLLOW_UP" | "UNASSIGNED" | "IMPORTANT" | "SYNCED" | "ALL">("ALL");
-  const [agentFilter, setAgentFilter] = useState(initialAgentId);
+  const [search, setSearch] = useState(initialSearch);
   const [selectedLeadIds, setSelectedLeadIds] = useState<string[]>([]);
   const [quickAssignLeadId, setQuickAssignLeadId] = useState<string | null>(null);
   const [quickAssignAgentId, setQuickAssignAgentId] = useState("");
@@ -210,32 +254,53 @@ export function CallLeadsPage({
   const [manualMessage, setManualMessage] = useState("");
   const [manualNotes, setManualNotes] = useState("");
 
-  const queueCounts = useMemo(() => ({
-    open: leads.filter((lead) => !["CONVERTED", "CLOSED", "NOT_INTERESTED"].includes(lead.status)).length,
-    followUp: leads.filter((lead) => lead.status === "FOLLOW_UP" || lead.nextFollowUpAt).length,
-    unassigned: leads.filter((lead) => !lead.assignedToId).length,
-    important: leads.filter((lead) => lead.isImportant).length,
-    synced: leads.filter((lead) => lead.sheetSyncedAt).length,
-  }), [leads]);
+  const { currentPage, pageSize, totalLeads, totalPages } = pagination;
 
-  const visibleLeads = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    return leads.filter((lead) => {
-      const matchesSearch = !term || [lead.displayName, lead.phone, lead.city, lead.assignedTo?.username]
-        .some((value) => value?.toLowerCase().includes(term));
-      const matchesQueue =
-        queue === "ALL" ||
-        (queue === "OPEN" && !["CONVERTED", "CLOSED", "NOT_INTERESTED"].includes(lead.status)) ||
-        (queue === "FOLLOW_UP" && (lead.status === "FOLLOW_UP" || Boolean(lead.nextFollowUpAt))) ||
-        (queue === "UNASSIGNED" && !lead.assignedToId) ||
-        (queue === "IMPORTANT" && lead.isImportant) ||
-        (queue === "SYNCED" && Boolean(lead.sheetSyncedAt));
-      const matchesAgent = agentFilter === "ALL" || lead.assignedToId === agentFilter;
-      return matchesSearch && matchesQueue && matchesAgent;
-    });
-  }, [agentFilter, leads, queue, search]);
+
+  const visibleLeads = leads;
+  const paginationPages = useMemo(() => {
+    if (totalPages <= 7) {
+      return Array.from({ length: totalPages }, (_, index) => index + 1);
+    }
+
+    return Array.from(
+      new Set([1, currentPage - 1, currentPage, currentPage + 1, totalPages]),
+    )
+      .filter((page) => page >= 1 && page <= totalPages)
+      .sort((a, b) => a - b);
+  }, [currentPage, totalPages]);
+  const firstVisibleLead = totalLeads ? (currentPage - 1) * pageSize + 1 : 0;
+  const lastVisibleLead = Math.min(currentPage * pageSize, totalLeads);
   const allVisibleLeadsSelected =
     visibleLeads.length > 0 && visibleLeads.every((lead) => selectedLeadIds.includes(lead.id));
+
+  const navigateWithParams = (updates: Record<string, string | null>) => {
+    const params = new URLSearchParams(window.location.search);
+
+    Object.entries(updates).forEach(([key, value]) => {
+      if (!value) {
+        params.delete(key);
+      } else {
+        params.set(key, value);
+      }
+    });
+
+    const target = "/admin/calls/leads" + (params.size ? "?" + params.toString() : "");
+    setExpandedLeadId(null);
+    startTransition(() => router.push(target));
+  };
+
+  const goToPage = (page: number) => {
+    if (page < 1 || page > totalPages || page === currentPage) return;
+    navigateWithParams({ page: page === 1 ? null : String(page) });
+  };
+
+  const toggleFilledFormFilter = () => {
+    navigateWithParams({
+      filledForm: filterFilledForm ? null : "true",
+      page: null,
+    });
+  };
 
   const openPanel = (lead: CallLeadRow) => {
     setActiveLead(lead);
@@ -466,11 +531,12 @@ export function CallLeadsPage({
       />
       <CallCenterTabs />
 
-      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
         <StatCard detail="Still needs operator attention" label="Open leads" value={queueCounts.open} />
         <StatCard detail="Scheduled or marked for follow-up" label="Follow-ups" tone="amber" value={queueCounts.followUp} />
         <StatCard detail="Needs an owner" label="Unassigned" tone={queueCounts.unassigned ? "rose" : "cyan"} value={queueCounts.unassigned} />
         <StatCard detail="Starred for priority handling" label="Important" tone="amber" value={queueCounts.important} />
+        <StatCard detail="Customer submitted the form" label="Filled Form" tone="emerald" value={queueCounts.filledForm} />
         <StatCard detail="Written to the lead sheet" label="Synced" tone="emerald" value={queueCounts.synced} />
       </section>
 
@@ -479,8 +545,14 @@ export function CallLeadsPage({
           <h2 className="font-semibold text-white">All leads</h2>
           <select
             className="h-9 rounded-lg border border-white/10 bg-black/40 px-3 text-xs font-semibold text-slate-200 outline-none focus:border-cyan-300"
-            onChange={(event) => setQueue(event.target.value as typeof queue)}
-            value={queue}
+            disabled={isPending}
+            onChange={(event) =>
+              navigateWithParams({
+                queue: event.target.value === "ALL" ? null : event.target.value,
+                page: null,
+              })
+            }
+            value={initialQueue}
           >
             <option value="OPEN">Open Leads</option>
             <option value="FOLLOW_UP">Follow-ups</option>
@@ -491,23 +563,64 @@ export function CallLeadsPage({
           </select>
           <select
             className="h-9 rounded-lg border border-white/10 bg-black/40 px-3 text-xs font-semibold text-slate-200 outline-none focus:border-cyan-300"
-            onChange={(event) => setAgentFilter(event.target.value)}
-            value={agentFilter}
+            disabled={isPending}
+            onChange={(event) =>
+              navigateWithParams({
+                agent: event.target.value === "ALL" ? null : event.target.value,
+                page: null,
+              })
+            }
+            value={initialAgentId}
           >
             <option value="ALL">All Agents</option>
             {agents.map((agent) => (
               <option key={agent.id} value={agent.id}>{agent.username}</option>
             ))}
           </select>
+          <button
+            type="button"
+            onClick={toggleFilledFormFilter}
+            className={`inline-flex h-9 items-center gap-1.5 rounded-lg border px-3 text-xs font-semibold transition ${
+              filterFilledForm
+                ? "border-emerald-400/40 bg-emerald-400/15 text-emerald-300 shadow-[0_0_8px_0px_rgba(52,211,153,0.25)]"
+                : "border-white/10 bg-black/40 text-slate-300 hover:border-emerald-400/30 hover:text-emerald-300"
+            }`}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+            </svg>
+            Filled Form
+            {filterFilledForm && (
+              <span className="ml-0.5 rounded-full bg-emerald-400/20 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300">
+                {totalLeads}
+              </span>
+            )}
+          </button>
         </div>
-        <input
-          className="h-9 w-full rounded-lg border border-white/10 bg-black/40 px-3 text-xs text-slate-200 outline-none placeholder:text-slate-500 focus:border-cyan-300 lg:max-w-xs"
-          onChange={(event) => setSearch(event.target.value)}
-          placeholder="Search leads..."
-          value={search}
-        />
-        <span className="rounded-lg bg-white/10 px-2.5 py-1 text-xs font-medium text-slate-300">
-          {visibleLeads.length} lead{visibleLeads.length === 1 ? "" : "s"}
+        <form
+          className="flex w-full gap-2 lg:ml-auto lg:max-w-sm"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const normalizedSearch = search.trim();
+            navigateWithParams({ q: normalizedSearch || null, page: null });
+          }}
+        >
+          <input
+            className="h-9 min-w-0 flex-1 rounded-lg border border-white/10 bg-black/40 px-3 text-xs text-slate-200 outline-none placeholder:text-slate-500 focus:border-cyan-300"
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search all leads..."
+            value={search}
+          />
+          <button
+            className="h-9 rounded-lg border border-cyan-300/25 bg-cyan-300/10 px-3 text-xs font-bold text-cyan-100 transition hover:bg-cyan-300/20 disabled:opacity-50"
+            disabled={isPending}
+            type="submit"
+          >
+            Search
+          </button>
+        </form>
+        <span className="whitespace-nowrap rounded-lg bg-white/10 px-2.5 py-1 text-xs font-medium text-slate-300">
+          {totalLeads} lead{totalLeads === 1 ? "" : "s"}
         </span>
       </section>
 
@@ -571,7 +684,7 @@ export function CallLeadsPage({
                   </div>
                   <button
                     aria-label={lead.isImportant ? "Unmark important" : "Mark important"}
-                    className={`grid h-8 w-8 place-items-center rounded-lg border text-lg leading-none transition ${
+                    className={`grid h-8 w-8 place-items-center rounded-lg border transition ${
                       lead.isImportant
                         ? "border-amber-300/40 bg-amber-300/15 text-amber-300"
                         : "border-white/10 bg-white/[0.03] text-slate-500 hover:border-amber-300/30 hover:text-amber-200"
@@ -584,7 +697,17 @@ export function CallLeadsPage({
                     title={lead.isImportant ? "Important" : "Mark important"}
                     type="button"
                   >
-                    {lead.isImportant ? "★" : "☆"}
+                    <svg
+                      aria-hidden="true"
+                      className="h-[18px] w-[18px]"
+                      fill={lead.isImportant ? "currentColor" : "none"}
+                      stroke="currentColor"
+                      strokeLinejoin="round"
+                      strokeWidth="1.8"
+                      viewBox="0 0 24 24"
+                    >
+                      <path d="m12 3.75 2.54 5.15 5.68.83-4.11 4 .97 5.65L12 16.7l-5.08 2.68.97-5.65-4.11-4 5.68-.83L12 3.75Z" />
+                    </svg>
                   </button>
                   <div className="min-w-0">
                     <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -636,7 +759,7 @@ export function CallLeadsPage({
                         className="text-cyan-400 hover:text-cyan-300 hover:underline font-semibold"
                         title={lead.address}
                       >
-                        📍 Open Map
+                        Open Map
                       </a>
                     ) : (
                       <p className="truncate text-slate-400" title={lead.address || ""}>{lead.address || "--"}</p>
@@ -784,6 +907,86 @@ export function CallLeadsPage({
                         </dl>
                       </div>
 
+                      {/* WhatsApp and form status */}
+                      <div className="space-y-2">
+                        <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-cyan-200">
+                          WhatsApp &amp; Form
+                        </p>
+                        <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-slate-300">
+                          <dt className="text-slate-500">WhatsApp status</dt>
+                          <dd>
+                            {lead.whatsappStatus ? (
+                              <span className={`rounded-md border px-1.5 py-0.5 text-[10px] font-bold ${
+                                lead.whatsappStatus === "SENT" ? "border-sky-300/20 bg-sky-300/10 text-sky-100" :
+                                lead.whatsappStatus === "FAILED" ? "border-rose-300/20 bg-rose-300/10 text-rose-100" :
+                                lead.whatsappStatus === "QUEUED" || lead.whatsappStatus === "SENDING" ? "border-cyan-300/20 bg-cyan-300/10 text-cyan-100" :
+                                lead.whatsappStatus === "FORM_SUBMITTED" ? "border-emerald-300/20 bg-emerald-300/10 text-emerald-100" :
+                                "border-white/10 bg-white/5 text-slate-300"
+                              }`}>
+                                {lead.whatsappStatus === "QUEUED" ? "Waiting to send" :
+                                 lead.whatsappStatus === "SENDING" ? "Sending now" :
+                                 lead.whatsappStatus === "SENT" ? "Sent \u2014 awaiting form" :
+                                 lead.whatsappStatus === "FAILED" ? "Failed \u26A0" :
+                                 lead.whatsappStatus === "FORM_SUBMITTED" ? "Form submitted \u2713" :
+                                 lead.whatsappStatus.replace(/_/g, " ")}
+                              </span>
+                            ) : (
+                              <span className="text-slate-500">Not sent</span>
+                            )}
+                          </dd>
+                          <dt className="text-slate-500">Form status</dt>
+                          <dd>
+                            {lead.hasSubmittedForm ? (
+                              <span className="rounded-md border border-emerald-300/20 bg-emerald-300/10 px-1.5 py-0.5 text-[10px] font-bold text-emerald-100">
+                                Submitted
+                              </span>
+                            ) : lead.formSubmission?.status === "FORM_STARTED" ? (
+                              <span className="text-amber-300 text-[11px]">Started (not submitted)</span>
+                            ) : lead.formSubmission?.status === "OPENED" ? (
+                              <span className="text-slate-400 text-[11px]">Opened (not started)</span>
+                            ) : lead.formToken ? (
+                              <span className="text-slate-500 text-[11px]">Pending form</span>
+                            ) : (
+                              <span className="text-slate-500 text-[11px]">No form</span>
+                            )}
+                          </dd>
+                          {lead.hasSubmittedForm && lead.submittedFormData && (
+                            <>
+                              <dt className="text-slate-500">Form name</dt>
+                              <dd>{lead.submittedFormData.name || "--"}</dd>
+                              <dt className="text-slate-500">Form city</dt>
+                              <dd>{lead.submittedFormData.city || "--"}</dd>
+                              <dt className="text-slate-500">Form property</dt>
+                              <dd>{lead.submittedFormData.propertyType || "--"}</dd>
+                              <dt className="text-slate-500">Form location</dt>
+                              <dd>
+                                {lead.submittedFormData.mapsLocation ? (
+                                  <a href={lead.submittedFormData.mapsLocation} target="_blank" rel="noreferrer" className="text-emerald-400 hover:text-emerald-300 underline text-[11px]">
+                                    Open Map
+                                  </a>
+                                ) : "--"}
+                              </dd>
+                            </>
+                          )}
+                          <dt className="text-slate-500">Sheet sync</dt>
+                          <dd className={lead.sheetSyncedAt ? "text-emerald-300" : "text-slate-500"}>
+                            {lead.sheetSyncedAt ? `Synced ${formatDate(lead.sheetSyncedAt)}` : "Not synced"}
+                          </dd>
+                          {lead.sheetSyncWarning && (
+                            <>
+                              <dt className="text-slate-500">Sync warning</dt>
+                              <dd className="text-amber-300 text-[11px]">{lead.sheetSyncWarning}</dd>
+                            </>
+                          )}
+                          {lead.lastWhatsAppError && (
+                            <>
+                              <dt className="text-slate-500">WA error</dt>
+                              <dd className="text-rose-300 text-[11px]">{lead.lastWhatsAppError}</dd>
+                            </>
+                          )}
+                        </dl>
+                      </div>
+
                       <div className="space-y-3">
                         <div>
                           <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-cyan-200">
@@ -886,6 +1089,77 @@ export function CallLeadsPage({
             </div>
           ) : null}
         </div>
+
+        <footer className="flex flex-col gap-3 border-t border-white/10 bg-black/20 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
+            <span>
+              Showing <strong className="text-slate-200">{firstVisibleLead}-{lastVisibleLead}</strong> of{" "}
+              <strong className="text-slate-200">{totalLeads}</strong> leads
+            </span>
+            <label className="flex items-center gap-2">
+              <span>Rows per page</span>
+              <select
+                aria-label="Rows per page"
+                className="h-8 rounded-lg border border-white/10 bg-black/40 px-2 text-xs font-semibold text-slate-200 outline-none focus:border-cyan-300"
+                disabled={isPending}
+                onChange={(event) =>
+                  navigateWithParams({
+                    pageSize: event.target.value === "25" ? null : event.target.value,
+                    page: null,
+                  })
+                }
+                value={pageSize}
+              >
+                <option value="10">10</option>
+                <option value="25">25</option>
+                <option value="50">50</option>
+              </select>
+            </label>
+          </div>
+
+          <nav aria-label="Call leads pagination" className="flex flex-wrap items-center gap-1">
+            <button
+              aria-label="Previous page"
+              className="h-8 rounded-lg border border-white/10 px-3 text-xs font-semibold text-slate-300 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={currentPage === 1 || isPending}
+              onClick={() => goToPage(currentPage - 1)}
+              type="button"
+            >
+              Previous
+            </button>
+            {paginationPages.map((page, pageIndex) => (
+              <Fragment key={page}>
+                {pageIndex > 0 && page - paginationPages[pageIndex - 1] > 1 ? (
+                  <span className="px-1 text-xs text-slate-600">...</span>
+                ) : null}
+                <button
+                  aria-current={page === currentPage ? "page" : undefined}
+                  aria-label={"Page " + page}
+                  className={
+                    "grid h-8 min-w-8 place-items-center rounded-lg border px-2 text-xs font-bold transition " +
+                    (page === currentPage
+                      ? "border-cyan-300/40 bg-cyan-300/15 text-cyan-100"
+                      : "border-white/10 text-slate-400 hover:bg-white/10 hover:text-white")
+                  }
+                  disabled={isPending}
+                  onClick={() => goToPage(page)}
+                  type="button"
+                >
+                  {page}
+                </button>
+              </Fragment>
+            ))}
+            <button
+              aria-label="Next page"
+              className="h-8 rounded-lg border border-white/10 px-3 text-xs font-semibold text-slate-300 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={currentPage === totalPages || isPending}
+              onClick={() => goToPage(currentPage + 1)}
+              type="button"
+            >
+              Next
+            </button>
+          </nav>
+        </footer>
       </section>
 
       {manualOpen ? (

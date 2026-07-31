@@ -18,8 +18,8 @@ export async function POST(request: NextRequest, context: RouteContext) {
     return NextResponse.json({ error: "note is required." }, { status: 400 });
   }
 
-  const lead = await db.callLead.findUnique({
-    where: { id: leadId },
+  const lead = await db.callLead.findFirst({
+    where: { id: leadId, deletedAt: null, isArchived: false },
     select: { id: true, notes: true, assignedToId: true },
   });
 
