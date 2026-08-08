@@ -15,6 +15,10 @@ import {
 } from "@/app/lib/whatsapp-actions";
 import { LiveCountdown } from "@/app/(dashboard)/components/live-countdown";
 import type { WhatsAppQueueEstimate } from "@/app/lib/whatsapp-queue-eta";
+import {
+  getWhatsAppMessageDeliveryState,
+  type WhatsAppMessageDeliveryState,
+} from "@/app/lib/whatsapp-delivery-status";
 
 
 type QueueItem = {
@@ -166,6 +170,42 @@ function formStatus(lead: Lead) {
   return formStatusPresentation("not_opened");
 }
 
+function messageDeliveryPresentation(state: WhatsAppMessageDeliveryState) {
+  const presentations: Record<WhatsAppMessageDeliveryState, { label: string; tone: string }> = {
+    SENT: {
+      label: "Message sent",
+      tone: "border-emerald-300/20 bg-emerald-300/10 text-emerald-200",
+    },
+    NOT_SENT: {
+      label: "Message not sent",
+      tone: "border-rose-300/25 bg-rose-300/10 text-rose-200",
+    },
+    QUEUED: {
+      label: "Message queued",
+      tone: "border-cyan-300/20 bg-cyan-300/10 text-cyan-200",
+    },
+    SENDING: {
+      label: "Message sending",
+      tone: "border-violet-300/20 bg-violet-300/10 text-violet-200",
+    },
+  };
+  return presentations[state];
+}
+
+function leadMessageDelivery(lead: Lead) {
+  const formWasOpenedOrSubmitted =
+    lead.hasSubmittedForm ||
+    lead.formSubmission?.status === "OPENED" ||
+    lead.formSubmission?.status === "FORM_STARTED";
+  return messageDeliveryPresentation(
+    getWhatsAppMessageDeliveryState(
+      lead.latestQueueItem?.status,
+      lead.status,
+      formWasOpenedOrSubmitted,
+    ),
+  );
+}
+
 export function WhatsAppLeadsClient({
   leads,
   failedCount,
@@ -295,10 +335,18 @@ export function WhatsAppLeadsClient({
 
   return (
     <div className="space-y-6">
-      <header>
-        <p className="text-[11px] font-bold uppercase tracking-[0.15em] text-cyan-400">WhatsApp</p>
-        <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">WhatsApp leads</h1>
-        <p className="mt-2 text-sm text-slate-400">Track whether each customer has opened or submitted the form.</p>
+      <header className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <p className="text-[11px] font-bold uppercase tracking-[0.15em] text-cyan-400">WhatsApp</p>
+          <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">WhatsApp leads</h1>
+          <p className="mt-2 text-sm text-slate-400">Track whether each customer has opened or submitted the form.</p>
+        </div>
+        <a
+          className="inline-flex h-10 items-center rounded-lg border border-emerald-300/20 bg-emerald-300/10 px-4 text-xs font-bold text-emerald-100 transition hover:bg-emerald-300/15"
+          href="/api/admin/exports/submitted-leads"
+        >
+          Export submitted leads ({tabCounts.submitted})
+        </a>
       </header>
 
       {accountHealth.some((account) => account.status !== "CONNECTED" || !account.autoReplyEnabled) && (
@@ -360,7 +408,7 @@ export function WhatsAppLeadsClient({
                     <th className="border-b border-white/10 py-2">Date</th>
                     <th className="border-b border-white/10 py-2 text-center">Queue #</th>
                     <th className="border-b border-white/10 py-2 text-center">Est. time</th>
-                    <th className="border-b border-white/10 py-2 text-right">Form status</th>
+                    <th className="border-b border-white/10 py-2 text-right">Message / form</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/[0.05]">
@@ -380,7 +428,6 @@ export function WhatsAppLeadsClient({
                       <td className="py-2.5 text-center text-xs">
                         <LiveCountdown
                           targetTime={call.eta?.earliestAt ?? call.targetTime}
-                          latestTime={call.eta?.latestAt}
                           etaState={call.eta?.state}
                           accountLabel={call.eta?.accountLabel}
                           queueStatus={call.waStatus}
@@ -389,13 +436,28 @@ export function WhatsAppLeadsClient({
                       </td>
                       <td className="py-2.5 text-right">
                         {call.waStatus ? (
-                          <span className={`rounded border px-1.5 py-0.5 text-[10px] font-bold ${formStatusPresentation(call.formStatus ?? "not_opened").tone}`}>{formStatusPresentation(call.formStatus ?? "not_opened").label}</span>
+                          <div className="flex flex-col items-end gap-1">
+                            {(() => {
+                              const delivery = messageDeliveryPresentation(
+                                getWhatsAppMessageDeliveryState(
+                                  call.waStatus,
+                                  call.waStatus,
+                                  call.formStatus === "opened" || call.formStatus === "submitted",
+                                ),
+                              );
+                              return <span className={`rounded border px-1.5 py-0.5 text-[10px] font-bold ${delivery.tone}`}>{delivery.label}</span>;
+                            })()}
+                            <span className={`rounded border px-1.5 py-0.5 text-[10px] font-bold ${formStatusPresentation(call.formStatus ?? "not_opened").tone}`}>Form: {formStatusPresentation(call.formStatus ?? "not_opened").label}</span>
+                          </div>
                         ) : loadingCallIds[call.id] ? (
-                          <button disabled className="rounded border border-cyan-300/20 bg-cyan-300/10 px-2 py-1 text-[10px] font-bold text-cyan-200">Queueing...</button>
+                          <div className="flex flex-col items-end gap-1"><span className="rounded border border-rose-300/25 bg-rose-300/10 px-1.5 py-0.5 text-[10px] font-bold text-rose-200">Message not sent</span><button disabled className="rounded border border-cyan-300/20 bg-cyan-300/10 px-2 py-1 text-[10px] font-bold text-cyan-200">Queueing...</button></div>
                         ) : (
-                          <div className="flex items-center justify-end gap-1.5">
+                          <div className="flex flex-col items-end gap-1.5">
+                            <span className="rounded border border-rose-300/25 bg-rose-300/10 px-1.5 py-0.5 text-[10px] font-bold text-rose-200">Message not sent</span>
+                            <div className="flex items-center justify-end gap-1.5">
                             <button onClick={() => handleManualQueue(call.id)} className="rounded border border-amber-300/20 bg-amber-300/10 px-2 py-1 text-[10px] font-bold text-amber-200 transition hover:bg-amber-300/20">Send WA</button>
                             <form action={deleteCallLeadDirectAction} className="inline-flex"><input name="callLeadId" type="hidden" value={call.id} /><button className="rounded border border-rose-300/20 bg-rose-300/10 px-2 py-1 text-[10px] font-bold text-rose-300 transition hover:bg-rose-300/20" type="submit">Delete</button></form>
+                            </div>
                           </div>
                         )}
                       </td>
@@ -523,7 +585,7 @@ export function WhatsAppLeadsClient({
               <thead className="text-xs uppercase tracking-[0.16em] text-slate-500">
                 <tr>
                   <th className="border-b border-white/10 py-3">Lead</th>
-                  <th className="border-b border-white/10 py-3">Form status</th>
+                  <th className="border-b border-white/10 py-3">Message / form status</th>
                   <th className="border-b border-white/10 py-3">Form link</th>
                   <th className="border-b border-white/10 py-3">Submission</th>
                   <th className="border-b border-white/10 py-3 text-right">Actions</th>
@@ -545,7 +607,10 @@ export function WhatsAppLeadsClient({
                         <p className="mt-0.5 text-xs text-slate-500">{lead.phone}</p>
                       </td>
                       <td className="py-3 text-xs">
-                        <span className={`rounded-lg border px-2 py-1 text-xs font-bold ${formStatus(lead).tone}`}>{formStatus(lead).label}</span>
+                        <div className="flex flex-col items-start gap-1.5">
+                          <span className={`rounded-lg border px-2 py-1 text-xs font-bold ${leadMessageDelivery(lead).tone}`}>{leadMessageDelivery(lead).label}</span>
+                          <span className={`rounded-lg border px-2 py-1 text-xs font-bold ${formStatus(lead).tone}`}>Form: {formStatus(lead).label}</span>
+                        </div>
                       </td>
                       <td className="py-3 text-xs">
                         {lead.publicFormUrl ? <a className="block max-w-[260px] break-all font-mono text-[11px] text-emerald-400 underline" href={lead.publicFormUrl} target="_blank" rel="noreferrer">{lead.publicFormUrl}</a> : <span className="text-slate-500">Unavailable</span>}

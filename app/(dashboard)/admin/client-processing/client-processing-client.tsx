@@ -446,7 +446,6 @@ export function ClientProcessingClient({
                             <span className="font-semibold text-cyan-300">
                               <LiveCountdown
                                 targetTime={row.eta?.earliestAt ?? row.targetTime}
-                                latestTime={row.eta?.latestAt}
                                 etaState={row.eta?.state}
                                 accountLabel={row.eta?.accountLabel}
                                 serverTime={serverTime}

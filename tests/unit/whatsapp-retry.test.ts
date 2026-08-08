@@ -34,4 +34,32 @@ describe("WhatsApp retry eligibility", () => {
     expect(isNonRetryableNumberFailure("Number not found on WhatsApp")).toBe(false);
     expect(isNonRetryableNumberFailure("Not registered on WhatsApp")).toBe(false);
   });
+
+  it("allows retry when an inbound reply arrived after the outbound send failed", () => {
+    const result = evaluateWhatsAppRetry({
+      status: "REPLIED",
+      lastError: null,
+      formSubmissions: [],
+      queueItems: [
+        {
+          status: "FAILED",
+          lastError: "Phone number +917397702193 is not registered on WhatsApp.",
+        },
+      ],
+    });
+
+    expect(result).toEqual({ retryable: true, reasons: [] });
+  });
+
+  it("does not retry a replied lead unless an outbound send actually failed", () => {
+    const result = evaluateWhatsAppRetry({
+      status: "REPLIED",
+      lastError: null,
+      formSubmissions: [],
+      queueItems: [],
+    });
+
+    expect(result.retryable).toBe(false);
+    expect(result.reasons).toContain("No failed WhatsApp send state");
+  });
 });

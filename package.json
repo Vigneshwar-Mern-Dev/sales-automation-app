@@ -29,6 +29,7 @@
     "queue:reset-stuck": "node scripts/reset-stuck-queue.mjs",
     "cleanup:login-attempts": "node scripts/cleanup-login-attempts.mjs",
     "cleanup:security": "node scripts/cleanup-login-attempts.mjs",
+    "leads:reconcile-submitted": "node scripts/reconcile-submitted-leads.mjs",
     "setup:production": "bash scripts/setup-production.sh",
     "backup:encrypted": "bash scripts/create-encrypted-backup.sh",
     "migrate:calls-integration": "node scripts/migrate-calls-integration.mjs"
