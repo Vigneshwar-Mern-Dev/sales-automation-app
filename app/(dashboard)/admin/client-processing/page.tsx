@@ -4,6 +4,10 @@ import type { Prisma } from "@prisma/client";
 import { db } from "@/app/lib/db";
 import { CallLeadStatus, WhatsAppLeadStatus } from "@/app/lib/prisma-enums";
 import { ClientProcessingClient } from "./client-processing-client";
+import {
+  buildWhatsAppQueueEstimates,
+  type WhatsAppQueueEstimate,
+} from "@/app/lib/whatsapp-queue-eta";
 
 type PageProps = {
   searchParams: Promise<{
@@ -28,6 +32,10 @@ export default async function AdminClientProcessingPage({ searchParams }: PagePr
   const callStatus = params.callStatus ?? "ALL";
   const waStatus = params.waStatus ?? "ALL";
   const skip = (page - 1) * PAGE_SIZE;
+  const queryNow = new Date();
+  const todayStart = new Date(queryNow);
+  todayStart.setHours(0, 0, 0, 0);
+  const sentHistoryStart = new Date(Math.min(todayStart.getTime(), queryNow.getTime() - 60 * 60 * 1000));
 
   // Build CallLead filtering criteria
   const callLeadWhere: Prisma.CallLeadWhereInput = {
@@ -108,7 +116,8 @@ export default async function AdminClientProcessingPage({ searchParams }: PagePr
     callLeads,
     totalCount,
     allQueuedLeads,
-    waAccount,
+    waAccounts,
+    sentItemsToday,
     agents,
     totalCallLeads,
     totalQueued,
@@ -130,12 +139,31 @@ export default async function AdminClientProcessingPage({ searchParams }: PagePr
     db.whatsAppQueueItem.findMany({
       where: { status: { in: ["QUEUED", "SENDING"] }, deletedAt: null, isArchived: false },
       orderBy: [{ sendAfterAt: "asc" }, { queuedAt: "asc" }, { id: "asc" }],
-      select: { id: true, phone: true, status: true, queuedAt: true, sendAfterAt: true },
+      select: { id: true, accountId: true, phone: true, status: true, queuedAt: true, sendAfterAt: true },
     }),
-    // Get real delay settings
-    db.whatsAppAccount.findFirst({
+    // Get per-account dispatch settings and health.
+    db.whatsAppAccount.findMany({
       orderBy: { createdAt: "asc" },
-      select: { minDelaySeconds: true, maxDelaySeconds: true, status: true, autoReplyEnabled: true },
+      select: {
+        id: true,
+        label: true,
+        status: true,
+        autoReplyEnabled: true,
+        lastHeartbeatAt: true,
+        consecutiveFailures: true,
+        autoPauseThreshold: true,
+        hourlySendLimit: true,
+        dailySendLimit: true,
+        warmupEnabled: true,
+        warmupStartDate: true,
+        warmupRampPerDay: true,
+        minDelaySeconds: true,
+        maxDelaySeconds: true,
+      },
+    }),
+    db.whatsAppQueueItem.findMany({
+      where: { status: "SENT", sentAt: { gte: sentHistoryStart }, deletedAt: null },
+      select: { accountId: true, sentAt: true },
     }),
     // Get active agents
     db.user.findMany({
@@ -170,31 +198,24 @@ export default async function AdminClientProcessingPage({ searchParams }: PagePr
   const waLeadMap = new Map(waLeads.map((wl) => [wl.phone, wl]));
 
   // Build queue position map — only QUEUED items get sequential positions
-  const queuePositionMap = new Map<string, number>();
-  const queueTargetTimeMap = new Map<string, string>();
-  let queuedPos = 0;
+  const serverNow = queryNow;
+  const estimates = buildWhatsAppQueueEstimates(allQueuedLeads, waAccounts, sentItemsToday, serverNow);
+  const queueEstimateMap = new Map<string, WhatsAppQueueEstimate>();
   allQueuedLeads.forEach((ql) => {
-    if (!queueTargetTimeMap.has(ql.phone)) {
-      queueTargetTimeMap.set(ql.phone, ql.sendAfterAt.toISOString());
-    }
-    if (ql.status === "QUEUED" && !queuePositionMap.has(ql.phone)) {
-      queuedPos++;
-      queuePositionMap.set(ql.phone, queuedPos);
-    }
+    const estimate = estimates.get(ql.id);
+    if (estimate && !queueEstimateMap.has(ql.phone)) queueEstimateMap.set(ql.phone, estimate);
   });
 
-  const avgDelay = waAccount
-    ? Math.round((waAccount.minDelaySeconds + waAccount.maxDelaySeconds) / 2)
-    : 120; // fallback 2 min
+  const avgDelay = waAccounts.length
+    ? Math.round(waAccounts.reduce((sum, account) => sum + (account.minDelaySeconds + account.maxDelaySeconds) / 2, 0) / waAccounts.length)
+    : 120;
 
-  // eslint-disable-next-line react-hooks/purity
-  const serverTime = Date.now();
+  const serverTime = serverNow.getTime();
 
   // Correlate CallLeads with their WhatsApp details
   const rows = callLeads.map((cl) => {
     const wa = waLeadMap.get(cl.phone) || null;
-    const queuePos = queuePositionMap.get(cl.phone) ?? null;
-    const targetTime = queueTargetTimeMap.get(cl.phone) ?? null;
+    const eta = queueEstimateMap.get(cl.phone) ?? null;
 
     return {
       id: cl.id,
@@ -221,8 +242,9 @@ export default async function AdminClientProcessingPage({ searchParams }: PagePr
       waLastReplyAt: wa?.lastReplyAt ?? null,
       waLastReplySnippet: wa?.lastReplySnippet ?? null,
       waLastError: wa?.lastError ?? null,
-      queuePosition: queuePos,
-      targetTime,
+      queuePosition: eta?.position ?? null,
+      targetTime: eta?.earliestAt ?? null,
+      eta,
     };
   });
 
@@ -239,8 +261,12 @@ export default async function AdminClientProcessingPage({ searchParams }: PagePr
       totalSent={totalSent}
       totalReplied={totalReplied}
       totalFailed={totalFailed}
-      accountStatus={waAccount?.status ?? "DISCONNECTED"}
-      autoReplyEnabled={waAccount?.autoReplyEnabled ?? false}
+      accountHealth={waAccounts.map((account) => ({
+        id: account.id,
+        label: account.label,
+        status: account.status,
+        autoReplyEnabled: account.autoReplyEnabled,
+      }))}
       serverTime={serverTime}
       initialSearch={q}
       initialAgent={agentId}

@@ -13,6 +13,7 @@ import {
   pauseWhatsAppAction,
   createWhatsAppAccountAction,
   deleteWhatsAppAccountAction,
+  mapCompanyPhoneToWhatsAppAction,
 } from "@/app/lib/whatsapp-actions";
 import { WhatsAppLeadStatus } from "@/app/lib/prisma-enums";
 import { WaLivePanel } from "../components/wa-live-panel";
@@ -144,6 +145,28 @@ export default async function AdminWhatsAppPage() {
   // Ensure at least one account exists for backward compatibility
   await ensureWhatsAppAccount();
   const accounts = await getWhatsAppAccounts();
+  const companyPhones = await db.companyPhone.findMany({
+    where: { isActive: true },
+    orderBy: [{ label: "asc" }, { createdAt: "asc" }],
+    select: {
+      id: true,
+      label: true,
+      phoneNumber: true,
+      lastSeenAt: true,
+      whatsappAccountId: true,
+    },
+  });
+  const publicCrmUrl =
+    process.env.CRM_PUBLIC_URL?.trim() ||
+    process.env.NEXT_PUBLIC_CRM_URL?.trim() ||
+    "http://localhost:3000";
+  let formLinkNeedsConfiguration = false;
+  try {
+    const hostname = new URL(publicCrmUrl).hostname.toLowerCase();
+    formLinkNeedsConfiguration = ["localhost", "127.0.0.1", "::1"].includes(hostname);
+  } catch {
+    formLinkNeedsConfiguration = true;
+  }
 
   // Generate QR data URLs for all accounts that need them
   const qrDataUrls = new Map<string, string>();
@@ -213,6 +236,15 @@ export default async function AdminWhatsAppPage() {
         </div>
       </section>
 
+      {formLinkNeedsConfiguration && (
+        <section className="rounded-lg border border-rose-300/25 bg-rose-300/10 p-4 text-sm leading-6 text-rose-100">
+          <p className="font-bold">Customer form links are not mobile-ready.</p>
+          <p className="mt-1 text-rose-100/80">
+            The public CRM URL is set to {publicCrmUrl}. Configure CRM_PUBLIC_URL with your HTTPS deployment domain before sending real messages.
+          </p>
+        </section>
+      )}
+
       {/* Account Cards */}
       <section className="grid gap-4 xl:grid-cols-2">
         {accounts.map((account, index) => {
@@ -226,6 +258,12 @@ export default async function AdminWhatsAppPage() {
           const heartbeatFresh = account.lastHeartbeatAt
             ? nowTimestamp - account.lastHeartbeatAt.getTime() < 5 * 60 * 1000
             : false;
+          const companyPhoneStale = Boolean(
+            account.companyPhone &&
+              (!account.companyPhone.isActive ||
+                !account.companyPhone.lastSeenAt ||
+                nowTimestamp - account.companyPhone.lastSeenAt.getTime() >= 15 * 60 * 1000),
+          );
 
           return (
             <div key={account.id} className={`rounded-xl border ${colors.border} bg-gradient-to-br ${colors.bg} to-transparent p-5 space-y-4`}>
@@ -288,6 +326,51 @@ export default async function AdminWhatsAppPage() {
                 </div>
               </div>
 
+              {/* Call-phone routing */}
+              <form
+                action={mapCompanyPhoneToWhatsAppAction}
+                className="rounded-lg border border-sky-300/15 bg-sky-300/[0.06] p-3"
+              >
+                <input name="accountId" type="hidden" value={account.id} />
+                <label className="text-[11px] font-bold uppercase tracking-wider text-sky-200" htmlFor={"companyPhone-" + account.id}>
+                  Calls received on
+                </label>
+                <div className="mt-2 flex gap-2">
+                  <select
+                    className="min-w-0 flex-1 rounded-md border border-white/10 bg-slate-950 px-3 py-2 text-xs text-slate-100"
+                    defaultValue={account.companyPhone?.id ?? ""}
+                    id={"companyPhone-" + account.id}
+                    name="companyPhoneId"
+                  >
+                    <option value="">Not mapped — select a phone</option>
+                    {companyPhones.map((phone) => (
+                      <option key={phone.id} value={phone.id}>
+                        {phone.label} ({phone.phoneNumber})
+                        {phone.whatsappAccountId && phone.whatsappAccountId !== account.id
+                          ? " — mapped to another account"
+                          : ""}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="rounded-md border border-sky-300/20 bg-sky-300/10 px-3 text-xs font-bold text-sky-100 transition hover:bg-sky-300/15"
+                    type="submit"
+                  >
+                    Save
+                  </button>
+                </div>
+                <p className="mt-2 text-[11px] leading-4 text-slate-400">
+                  {account.companyPhone
+                    ? "Incoming calls on " + account.companyPhone.label + " always queue through this WhatsApp account, even while it is offline."
+                    : "Required for deterministic two-phone routing. Until mapped, the system uses a temporary fallback account."}
+                </p>
+                {companyPhoneStale ? (
+                  <p className="mt-2 rounded border border-amber-300/20 bg-amber-300/10 px-2 py-1.5 text-[11px] leading-4 text-amber-200">
+                    Warning: this call-tracker phone has not checked in recently. The mapping is preserved, but new-call routing cannot be trusted until the tracker is live.
+                  </p>
+                ) : null}
+              </form>
+
               {/* QR / Connection Panel */}
               <div className="rounded-lg border border-white/10 bg-black/30 p-4">
                 {account.status === "CONNECTED" ? (
@@ -343,6 +426,8 @@ export default async function AdminWhatsAppPage() {
                   ["Cooldown", account.contactCooldownDays > 0 ? `${account.contactCooldownDays} days` : "Off"],
                   ["Auto-reply", account.autoReplyEnabled ? "ON" : "OFF"],
                   ["Warmup", account.warmupEnabled ? `ON (${account.warmupRampPerDay}/day)` : "Off"],
+                  ["Call phone", account.companyPhone?.label ?? "Not mapped"],
+                  ["Tracker last seen", formatDate(account.companyPhone?.lastSeenAt ?? null)],
                 ].map(([label, value]) => (
                   <div className="flex justify-between gap-4 rounded border border-white/5 bg-black/20 px-3 py-2" key={label}>
                     <dt className="text-slate-500">{label}</dt>
@@ -426,18 +511,12 @@ export default async function AdminWhatsAppPage() {
       <section className="rounded-lg border border-white/10 bg-white/[0.03] p-5">
         <h2 className="text-lg font-semibold text-white">Running workers</h2>
         <p className="mt-2 text-sm text-slate-400">
-          Each account needs its own worker process. Copy the account ID from the card above and set it as <code className="rounded bg-black/40 px-1 text-cyan-100">WHATSAPP_ACCOUNT_ID</code>.
+          The worker manager automatically starts and supervises one isolated worker for every account.
         </p>
         <div className="mt-4 rounded-lg border border-white/10 bg-black/30 p-4 font-mono text-xs leading-6 text-slate-300">
-          {accounts.map((account, i) => (
-            <div key={account.id} className={i > 0 ? "mt-3 border-t border-white/5 pt-3" : ""}>
-              <p className="text-slate-500"># {account.label}</p>
-              <p>$env:WHATSAPP_ACCOUNT_ID=&quot;{account.id}&quot;</p>
-              <p>$env:WHATSAPP_BRIDGE_TOKEN=&quot;your-token&quot;</p>
-              <p>$env:CRM_BASE_URL=&quot;http://localhost:3000&quot;</p>
-              <p>npm run whatsapp:worker</p>
-            </div>
-          ))}
+          <p>$env:WHATSAPP_BRIDGE_TOKEN=&quot;your-token&quot;</p>
+          <p>$env:CRM_BASE_URL=&quot;http://localhost:3000&quot;</p>
+          <p>npm run whatsapp:workers</p>
         </div>
       </section>
 

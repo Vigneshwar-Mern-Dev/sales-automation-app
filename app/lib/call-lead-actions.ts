@@ -544,8 +544,21 @@ export async function createManualCallLeadAction(data: {
       });
     }
 
-    // Auto-queue WhatsApp message for this lead
-    await autoQueueWhatsAppForCaller(lead.phone, displayName, "MISSED");
+    // Route the manual automation through the same company phone as the most
+    // recent call session. If there is no session, the automation is skipped
+    // rather than guessing a sender.
+    const routingSession = await db.callSession.findFirst({
+      where: { leadId: lead.id, deletedAt: null, isArchived: false },
+      orderBy: { firstRingAt: "desc" },
+      select: { companyPhoneId: true },
+    });
+    await autoQueueWhatsAppForCaller(
+      lead.phone,
+      displayName,
+      "MISSED",
+      lead.id,
+      routingSession?.companyPhoneId,
+    );
 
     revalidateCallViews();
     revalidatePath("/admin/whatsapp/leads");

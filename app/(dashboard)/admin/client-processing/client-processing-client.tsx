@@ -9,6 +9,7 @@ import {
   deleteCallLeadDirectAction,
 } from "@/app/lib/whatsapp-actions";
 import { LiveCountdown } from "@/app/(dashboard)/components/live-countdown";
+import type { WhatsAppQueueEstimate } from "@/app/lib/whatsapp-queue-eta";
 
 type Row = {
   id: string;
@@ -37,6 +38,7 @@ type Row = {
   waLastError: string | null;
   queuePosition: number | null;
   targetTime: string | null;
+  eta: WhatsAppQueueEstimate | null;
 };
 
 type Agent = {
@@ -110,8 +112,7 @@ export function ClientProcessingClient({
   totalSent,
   totalReplied,
   totalFailed,
-  accountStatus,
-  autoReplyEnabled,
+  accountHealth,
   serverTime,
   initialSearch,
   initialAgent,
@@ -129,8 +130,7 @@ export function ClientProcessingClient({
   totalSent: number;
   totalReplied: number;
   totalFailed: number;
-  accountStatus: string;
-  autoReplyEnabled: boolean;
+  accountHealth: Array<{ id: string; label: string; status: string; autoReplyEnabled: boolean }>;
   serverTime: number;
   initialSearch: string;
   initialAgent: string;
@@ -245,34 +245,34 @@ export function ClientProcessingClient({
       </header>
 
       {/* Warnings panel */}
-      {(accountStatus !== "CONNECTED" || !autoReplyEnabled) && (
+      {accountHealth.some((account) => account.status !== "CONNECTED" || !account.autoReplyEnabled) && (
         <div className="flex flex-col gap-3">
-          {accountStatus !== "CONNECTED" && (
-            <div className="flex items-center gap-3 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3">
+          {accountHealth.filter((account) => account.status !== "CONNECTED").map((account) => (
+            <div className="flex items-center gap-3 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3" key={`offline-${account.id}`}>
               <svg className="h-5 w-5 text-red-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
               <div>
-                <p className="text-sm font-semibold text-red-200">Device not connected</p>
+                <p className="text-sm font-semibold text-red-200">{account.label}: device not connected</p>
                 <p className="text-xs text-red-300/70 mt-0.5">
-                  The WhatsApp worker is currently <span className="font-bold">{accountStatus}</span>. WhatsApp sending is paused until you connect a device in WhatsApp Settings.
+                  This worker is <span className="font-bold">{account.status}</span>. Only this sender account&apos;s queue is blocked.
                 </p>
               </div>
             </div>
-          )}
-          {!autoReplyEnabled && (
-            <div className="flex items-center gap-3 rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3">
+          ))}
+          {accountHealth.filter((account) => !account.autoReplyEnabled).map((account) => (
+            <div className="flex items-center gap-3 rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3" key={`paused-${account.id}`}>
               <svg className="h-5 w-5 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
               <div>
-                <p className="text-sm font-semibold text-amber-200">Auto-reply is paused</p>
+                <p className="text-sm font-semibold text-amber-200">{account.label}: sending is paused</p>
                 <p className="text-xs text-amber-300/70 mt-0.5">
                   Automated messaging has been disabled. The processing queue will retain entries, but they won&apos;t be dispatched.
                 </p>
               </div>
             </div>
-          )}
+          ))}
         </div>
       )}
 
@@ -445,14 +445,16 @@ export function ClientProcessingClient({
                             Send in:{" "}
                             <span className="font-semibold text-cyan-300">
                               <LiveCountdown
-                                targetTime={row.targetTime}
+                                targetTime={row.eta?.earliestAt ?? row.targetTime}
+                                latestTime={row.eta?.latestAt}
+                                etaState={row.eta?.state}
+                                accountLabel={row.eta?.accountLabel}
                                 serverTime={serverTime}
                                 queueStatus={row.waStatus}
-                                accountStatus={accountStatus}
-                                autoReplyEnabled={autoReplyEnabled}
                               />
                             </span>
                           </p>
+                          {row.eta?.accountLabel ? <p className="text-[10px] text-slate-600">{row.eta.accountLabel}</p> : null}
                         </div>
                       ) : row.waStatus ? (
                         <div className="space-y-0.5">

@@ -368,6 +368,8 @@ model CompanyPhone {
   lastSyncErrorAt      DateTime? @map("last_sync_error_at")
   syncRetryCount       Int?      @map("sync_retry_count")
   permissionStatus     Json?     @map("permission_status")
+  whatsappAccountId    String?          @unique @map("whatsapp_account_id")
+  whatsappAccount      WhatsAppAccount? @relation(fields: [whatsappAccountId], references: [id], onDelete: SetNull)
 
   events   CallEvent[]
   sessions CallSession[]
@@ -608,6 +610,7 @@ model WhatsAppAccount {
   leads               WhatsAppLead[]
   preferredByLeads    WhatsAppLead[]            @relation("PreferredAccount")
   queueItems          WhatsAppQueueItem[]
+  companyPhone        CompanyPhone?
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

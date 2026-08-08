@@ -14,6 +14,7 @@ import {
   type BulkCleanupResult,
 } from "@/app/lib/whatsapp-actions";
 import { LiveCountdown } from "@/app/(dashboard)/components/live-countdown";
+import type { WhatsAppQueueEstimate } from "@/app/lib/whatsapp-queue-eta";
 
 
 type QueueItem = {
@@ -47,9 +48,6 @@ type Lead = {
   phone: string;
   message: string | null;
   status: WhatsAppLeadStatus;
-  lastSentAt: Date | string | null;
-  lastReplyAt: Date | string | null;
-  lastReplySnippet: string | null;
   lastError: string | null;
   createdAt: Date | string;
   updatedAt: Date | string;
@@ -65,20 +63,20 @@ type Lead = {
   formSubmissions: FormSubmission[];
   formSubmission: FormSubmission | null;
   hasSubmittedForm: boolean;
-  lifecycleStatus: string;
   accountLabel?: string | null;
   retryEligibility: { retryable: boolean; reasons: string[] };
   targetTime: string | null;
+  eta: WhatsAppQueueEstimate | null;
 };
 
 type RetryPreview = Pick<RetryFailedLeadsResult, "totalFailed" | "retryable" | "skipped" | "skippedRows">;
 
+type FormState = "not_opened" | "opened" | "submitted";
+
 type TabCounts = {
   all: number;
-  queue: number;
-  awaiting: number;
-  failed: number;
-  replied: number;
+  not_opened: number;
+  opened: number;
   submitted: number;
 };
 
@@ -98,7 +96,6 @@ function statusTone(status: string) {
     OPENED: "border-sky-300/20 bg-sky-300/10 text-sky-100",
     FORM_STARTED: "border-amber-300/20 bg-amber-300/10 text-amber-100",
     FORM_SUBMITTED: "border-emerald-300/20 bg-emerald-300/10 text-emerald-100",
-    REPLIED: "border-violet-300/20 bg-violet-300/10 text-violet-100",
     FAILED: "border-rose-300/20 bg-rose-300/10 text-rose-100",
     DO_NOT_CONTACT: "border-zinc-300/20 bg-zinc-300/10 text-zinc-200",
     CANCELLED: "border-zinc-300/20 bg-zinc-300/10 text-zinc-200",
@@ -142,7 +139,6 @@ function statusLabel(status: string) {
     OPENED: "Opened",
     FORM_STARTED: "Form started",
     FORM_SUBMITTED: "Form submitted",
-    REPLIED: "Customer replied",
     FAILED: "Failed",
     DO_NOT_CONTACT: "Do not contact",
     NEW: "New",
@@ -152,12 +148,22 @@ function statusLabel(status: string) {
   return labels[status] || status.replaceAll("_", " ");
 }
 
-function formStatusLabel(lead: Lead) {
-  if (lead.hasSubmittedForm) return "Form submitted";
-  if (lead.formSubmission?.status === "FORM_STARTED") return "Started, not submitted";
-  if (lead.formSubmission?.status === "OPENED") return "Opened, not submitted";
-  if (lead.formToken) return "Pending form";
-  return "No form";
+function formStatusPresentation(status: FormState) {
+  if (status === "submitted") {
+    return { label: "Submitted", tone: "border-emerald-300/20 bg-emerald-300/10 text-emerald-200" };
+  }
+  if (status === "opened") {
+    return { label: "Opened", tone: "border-amber-300/20 bg-amber-300/10 text-amber-200" };
+  }
+  return { label: "Not opened", tone: "border-slate-300/20 bg-slate-300/10 text-slate-300" };
+}
+
+function formStatus(lead: Lead) {
+  if (lead.hasSubmittedForm) return formStatusPresentation("submitted");
+  if (lead.formSubmission?.status === "FORM_STARTED" || lead.formSubmission?.status === "OPENED") {
+    return formStatusPresentation("opened");
+  }
+  return formStatusPresentation("not_opened");
 }
 
 export function WhatsAppLeadsClient({
@@ -170,8 +176,7 @@ export function WhatsAppLeadsClient({
   incomingCallLeads,
   avgDelaySeconds,
   totalQueued,
-  accountStatus,
-  autoReplyEnabled,
+  accountHealth,
   serverTime,
   publicUrlError,
   initialSearch,
@@ -191,16 +196,17 @@ export function WhatsAppLeadsClient({
     updatedAt: Date | string;
     createdAt: Date | string;
     waStatus: WhatsAppLeadStatus | null;
+    formStatus: FormState | null;
     waLeadId: string | null;
     queuePosition: number | null;
     targetTime: string | null;
+    eta: WhatsAppQueueEstimate | null;
     callStatus: string | null;
     callDuration: number | null;
   }[];
   avgDelaySeconds: number;
   totalQueued: number;
-  accountStatus: string;
-  autoReplyEnabled: boolean;
+  accountHealth: Array<{ id: string; label: string; status: string; autoReplyEnabled: boolean }>;
   serverTime: number;
   publicUrlError: string | null;
   initialSearch?: string;
@@ -292,23 +298,23 @@ export function WhatsAppLeadsClient({
       <header>
         <p className="text-[11px] font-bold uppercase tracking-[0.15em] text-cyan-400">WhatsApp</p>
         <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">WhatsApp leads</h1>
-        <p className="mt-2 text-sm text-slate-400">One row per lead with current status, latest queue state, form state, and retry controls.</p>
+        <p className="mt-2 text-sm text-slate-400">Track whether each customer has opened or submitted the form.</p>
       </header>
 
-      {(accountStatus !== "CONNECTED" || !autoReplyEnabled) && (
+      {accountHealth.some((account) => account.status !== "CONNECTED" || !account.autoReplyEnabled) && (
         <div className="flex flex-col gap-3">
-          {accountStatus !== "CONNECTED" && (
-            <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3">
-              <p className="text-sm font-semibold text-red-200">Device not connected</p>
-              <p className="mt-0.5 text-xs text-red-300/70">Worker status is {accountStatus}. Queued messages will not send until the device is connected.</p>
+          {accountHealth.filter((account) => account.status !== "CONNECTED").map((account) => (
+            <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3" key={`offline-${account.id}`}>
+              <p className="text-sm font-semibold text-red-200">{account.label}: device not connected</p>
+              <p className="mt-0.5 text-xs text-red-300/70">Worker status is {account.status}. Only this account&apos;s queue is blocked.</p>
             </div>
-          )}
-          {!autoReplyEnabled && (
-            <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3">
-              <p className="text-sm font-semibold text-amber-200">Auto-reply is paused</p>
-              <p className="mt-0.5 text-xs text-amber-300/70">The queue can build up, but the worker will not dispatch messages.</p>
+          ))}
+          {accountHealth.filter((account) => !account.autoReplyEnabled).map((account) => (
+            <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3" key={`paused-${account.id}`}>
+              <p className="text-sm font-semibold text-amber-200">{account.label}: sending is paused</p>
+              <p className="mt-0.5 text-xs text-amber-300/70">Its queue is retained, but it will not dispatch until an admin resumes it.</p>
             </div>
-          )}
+          ))}
         </div>
       )}
 
@@ -354,7 +360,7 @@ export function WhatsAppLeadsClient({
                     <th className="border-b border-white/10 py-2">Date</th>
                     <th className="border-b border-white/10 py-2 text-center">Queue #</th>
                     <th className="border-b border-white/10 py-2 text-center">Est. time</th>
-                    <th className="border-b border-white/10 py-2 text-right">WA status</th>
+                    <th className="border-b border-white/10 py-2 text-right">Form status</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/[0.05]">
@@ -371,10 +377,19 @@ export function WhatsAppLeadsClient({
                       </td>
                       <td className="py-2.5 text-[11px] text-slate-500">{formatDate(call.createdAt)}</td>
                       <td className="py-2.5 text-center">{call.queuePosition ? <span className="text-xs font-bold text-cyan-200">#{call.queuePosition}</span> : <span className="text-[11px] text-slate-500">--</span>}</td>
-                      <td className="py-2.5 text-center text-xs"><LiveCountdown targetTime={call.targetTime} queueStatus={call.waStatus} accountStatus={accountStatus} autoReplyEnabled={autoReplyEnabled} /></td>
+                      <td className="py-2.5 text-center text-xs">
+                        <LiveCountdown
+                          targetTime={call.eta?.earliestAt ?? call.targetTime}
+                          latestTime={call.eta?.latestAt}
+                          etaState={call.eta?.state}
+                          accountLabel={call.eta?.accountLabel}
+                          queueStatus={call.waStatus}
+                        />
+                        {call.eta?.accountLabel ? <p className="mt-1 text-[10px] text-slate-500">{call.eta.accountLabel}</p> : null}
+                      </td>
                       <td className="py-2.5 text-right">
                         {call.waStatus ? (
-                          <span className={`rounded border px-1.5 py-0.5 text-[10px] font-bold ${statusTone(call.waStatus)}`}>{statusLabel(call.waStatus)}</span>
+                          <span className={`rounded border px-1.5 py-0.5 text-[10px] font-bold ${formStatusPresentation(call.formStatus ?? "not_opened").tone}`}>{formStatusPresentation(call.formStatus ?? "not_opened").label}</span>
                         ) : loadingCallIds[call.id] ? (
                           <button disabled className="rounded border border-cyan-300/20 bg-cyan-300/10 px-2 py-1 text-[10px] font-bold text-cyan-200">Queueing...</button>
                         ) : (
@@ -410,14 +425,13 @@ export function WhatsAppLeadsClient({
           {showCleanupConfirm && (
             <div className="mt-3 rounded-lg border border-amber-400/30 bg-amber-950/60 p-4">
               <p className="text-sm font-semibold text-amber-200">Confirm bulk cleanup</p>
-              <p className="mt-2 text-xs text-slate-300">This will permanently archive all <strong>failed</strong> and <strong>awaiting form</strong> WhatsApp leads. Submitted and replied leads will be kept safe.</p>
+              <p className="mt-2 text-xs text-slate-300">This permanently archives failed and awaiting-form leads. All other leads are kept.</p>
               {cleanupResult && (
-                <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-5">
+                <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
                   <div className="rounded border border-white/10 bg-black/20 p-2"><span className="text-slate-500">Total cleaned</span><p className="text-lg font-bold text-white">{cleanupResult.totalCleaned}</p></div>
                   <div className="rounded border border-rose-300/20 bg-rose-300/10 p-2"><span className="text-rose-200/80">Failed removed</span><p className="text-lg font-bold text-rose-100">{cleanupResult.failedCleaned}</p></div>
                   <div className="rounded border border-amber-300/20 bg-amber-300/10 p-2"><span className="text-amber-200/80">Awaiting removed</span><p className="text-lg font-bold text-amber-100">{cleanupResult.awaitingCleaned}</p></div>
                   <div className="rounded border border-emerald-300/20 bg-emerald-300/10 p-2"><span className="text-emerald-200/80">Submitted kept</span><p className="text-lg font-bold text-emerald-100">{cleanupResult.keptSubmitted}</p></div>
-                  <div className="rounded border border-violet-300/20 bg-violet-300/10 p-2"><span className="text-violet-200/80">Replied kept</span><p className="text-lg font-bold text-violet-100">{cleanupResult.keptReplied}</p></div>
                 </div>
               )}
               <div className="mt-3 flex items-center gap-2">
@@ -492,11 +506,9 @@ export function WhatsAppLeadsClient({
           <div className="mt-4 flex flex-wrap items-center gap-1.5 border-b border-white/10 pb-3">
             {[
               { key: "all", label: "All", count: tabCounts.all },
-              { key: "queue", label: "Queue", count: tabCounts.queue },
-              { key: "awaiting", label: "Awaiting Form", count: tabCounts.awaiting },
-              { key: "failed", label: "Failed", count: tabCounts.failed },
-              { key: "replied", label: "Replied", count: tabCounts.replied },
-              { key: "submitted", label: "Form Submitted", count: tabCounts.submitted },
+              { key: "not_opened", label: "Not opened", count: tabCounts.not_opened },
+              { key: "opened", label: "Opened", count: tabCounts.opened },
+              { key: "submitted", label: "Submitted", count: tabCounts.submitted },
             ].map((t) => (
               <a key={t.key} href={`/admin/whatsapp/leads?tab=${t.key}&page=1${search ? `&q=${encodeURIComponent(search)}` : ""}`} className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[11px] font-semibold transition ${activeTab === t.key ? "border-cyan-400/50 bg-cyan-400/15 text-cyan-300" : "border-white/10 bg-black/30 text-slate-400 hover:border-white/20 hover:text-slate-200"}`}>
                 {t.label}<span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${activeTab === t.key ? "bg-cyan-400/20 text-cyan-300" : t.key === "failed" && t.count > 0 ? "bg-rose-400/20 text-rose-300" : "bg-white/10 text-slate-500"}`}>{t.count}</span>
@@ -507,14 +519,13 @@ export function WhatsAppLeadsClient({
           <div className="mt-4"><input className="h-10 w-full rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-white outline-none placeholder:text-slate-600 focus:border-cyan-300" onChange={(e) => setSearch(e.target.value)} placeholder="Search by name or phone number..." type="search" value={search} /></div>
 
           <div className="mt-4 overflow-x-auto">
-            <table className="w-full min-w-[980px] text-left text-sm">
+            <table className="w-full min-w-[820px] text-left text-sm">
               <thead className="text-xs uppercase tracking-[0.16em] text-slate-500">
                 <tr>
                   <th className="border-b border-white/10 py-3">Lead</th>
-                  <th className="border-b border-white/10 py-3">WhatsApp status</th>
                   <th className="border-b border-white/10 py-3">Form status</th>
-                  <th className="border-b border-white/10 py-3">Latest queue</th>
-                  <th className="border-b border-white/10 py-3">Last contact</th>
+                  <th className="border-b border-white/10 py-3">Form link</th>
+                  <th className="border-b border-white/10 py-3">Submission</th>
                   <th className="border-b border-white/10 py-3 text-right">Actions</th>
                 </tr>
               </thead>
@@ -532,25 +543,15 @@ export function WhatsAppLeadsClient({
                           )}
                         </div>
                         <p className="mt-0.5 text-xs text-slate-500">{lead.phone}</p>
-                        {lead.lastReplySnippet && <p className="mt-1 line-clamp-2 max-w-xs text-xs text-violet-300">Reply: {lead.lastReplySnippet}</p>}
-                        {lead.lastError && <p className="mt-1 max-w-xs text-xs text-rose-300">Error: {lead.lastError}</p>}
-                      </td>
-                      <td className="py-3"><span className={`rounded-lg border px-2 py-1 text-xs font-bold ${statusTone(lead.lifecycleStatus)}`}>{statusLabel(lead.lifecycleStatus)}</span></td>
-                      <td className="py-3 text-xs">
-                        <span className={lead.hasSubmittedForm ? "font-semibold text-emerald-300" : "text-slate-400"}>{formStatusLabel(lead)}</span>
-                        {lead.publicFormUrl && !lead.hasSubmittedForm && <a className="mt-1 block max-w-[220px] break-all font-mono text-[11px] text-emerald-400 underline" href={lead.publicFormUrl} target="_blank" rel="noreferrer">{lead.publicFormUrl}</a>}
                       </td>
                       <td className="py-3 text-xs">
-                        {lead.latestQueueItem ? (
-                          <div>
-                            <span className={`rounded border px-1.5 py-0.5 text-[10px] font-bold ${statusTone(lead.latestQueueItem.status)}`}>{statusLabel(lead.latestQueueItem.status)}</span>
-                            {lead.targetTime && <p className="mt-1 text-cyan-200">Est. <LiveCountdown targetTime={lead.targetTime} queueStatus={lead.latestQueueItem.status} accountStatus={accountStatus} autoReplyEnabled={autoReplyEnabled} /></p>}
-                            {lead.latestQueueItem.lastError && <p className="mt-1 max-w-[220px] text-rose-300">{lead.latestQueueItem.lastError}</p>}
-                          </div>
-                        ) : <span className="text-slate-500">No queue item</span>}
+                        <span className={`rounded-lg border px-2 py-1 text-xs font-bold ${formStatus(lead).tone}`}>{formStatus(lead).label}</span>
                       </td>
-                      <td className="py-3 text-xs text-slate-400">
-                        {lead.lastReplyAt ? <><span className="block text-violet-300">Replied {formatDate(lead.lastReplyAt)}</span>{lead.lastSentAt && <span className="block">Sent {formatDate(lead.lastSentAt)}</span>}</> : lead.lastSentAt ? formatDate(lead.lastSentAt) : formatDate(lead.createdAt)}
+                      <td className="py-3 text-xs">
+                        {lead.publicFormUrl ? <a className="block max-w-[260px] break-all font-mono text-[11px] text-emerald-400 underline" href={lead.publicFormUrl} target="_blank" rel="noreferrer">{lead.publicFormUrl}</a> : <span className="text-slate-500">Unavailable</span>}
+                      </td>
+                      <td className="py-3 pr-3 text-xs text-slate-400">
+                        {lead.hasSubmittedForm ? <><span className="block font-semibold text-emerald-300">{lead.formSubmission?.name || lead.formName || "Submitted"}</span><span className="mt-1 block">{formatDate(lead.formSubmission?.submittedAt ?? lead.formSubmittedAt)}</span></> : <span className="text-slate-500">Not submitted</span>}
                       </td>
                       <td className="py-3 text-right">
                         <div className="flex justify-end gap-2">
@@ -562,8 +563,8 @@ export function WhatsAppLeadsClient({
                     </tr>
                     {expandedLeadId === lead.id && (
                       <tr key={`${lead.id}-details`}>
-                        <td colSpan={6} className="bg-black/20 px-4 py-4">
-                          <div className="grid gap-4 lg:grid-cols-[1.4fr_0.8fr_0.8fr]">
+                        <td colSpan={5} className="bg-black/20 px-4 py-4">
+                          <div className="grid gap-4 lg:grid-cols-[1.4fr_0.8fr]">
                             <div>
                               <p className="text-xs font-bold uppercase tracking-[0.14em] text-slate-500">Queue history</p>
                               <div className="mt-2 overflow-x-auto">
@@ -595,22 +596,13 @@ export function WhatsAppLeadsClient({
                                 <dt className="text-slate-500">Property</dt><dd>{lead.formSubmission?.propertyType || lead.formPropertyType || "--"}</dd>
                               </dl>
                             </div>
-                            <div>
-                              <p className="text-xs font-bold uppercase tracking-[0.14em] text-slate-500">Inbound replies</p>
-                              {lead.lastReplyAt || lead.lastReplySnippet ? (
-                                <div className="mt-2 rounded border border-violet-300/20 bg-violet-300/10 p-3 text-xs text-violet-100">
-                                  <p className="font-semibold">{formatDate(lead.lastReplyAt)}</p>
-                                  <p className="mt-1 whitespace-pre-wrap">{lead.lastReplySnippet || "Reply detected"}</p>
-                                </div>
-                              ) : <p className="mt-2 text-xs text-slate-500">No inbound reply recorded.</p>}
-                            </div>
                           </div>
                         </td>
                       </tr>
                     )}
                   </Fragment>
                 ))}
-                {!filtered.length && <tr><td className="py-8 text-slate-500" colSpan={6}>{search ? `No leads matching "${search}".` : "No WhatsApp leads yet."}</td></tr>}
+                {!filtered.length && <tr><td className="py-8 text-slate-500" colSpan={5}>{search ? `No leads matching "${search}".` : "No WhatsApp leads yet."}</td></tr>}
               </tbody>
             </table>
           </div>

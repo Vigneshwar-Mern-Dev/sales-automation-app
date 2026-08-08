@@ -58,7 +58,9 @@ next-env.d.ts
 # whatsapp auth sessions and cache
 .whatsapp-auth/
 .whatsapp-auth-new/
+.whatsapp-auth-*/
 .wwebjs_cache/
+.whatsapp-worker-manager.lock
 
 # logs
 /logs/

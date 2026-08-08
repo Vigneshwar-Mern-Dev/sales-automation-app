@@ -4,6 +4,7 @@ import type { Prisma } from "@prisma/client";
 import { db } from "./db";
 import { generateUniqueFormToken } from "./short-token";
 import { moveOutsideWhatsAppQuietTime, randomDelaySeconds } from "./whatsapp-schedule";
+import { normalizeWhatsAppE164 } from "./whatsapp-phone.mjs";
 
 const ACTIVE_QUEUE_STATUSES = ["QUEUED", "SENDING"] as const;
 
@@ -15,6 +16,8 @@ type QueueWhatsAppInput = {
   consentAt?: Date;
   callLeadId?: string | null;
   source?: string;
+  routingReason?: string;
+  routingWarning?: string;
 };
 
 type Tx = Prisma.TransactionClient;
@@ -63,14 +66,19 @@ async function findOrCreateCallLead(
  * form submissions always reach the right client.
  */
 export async function queueWhatsAppMessage(input: QueueWhatsAppInput) {
+  const normalizedInput = {
+    ...input,
+    phone: normalizeWhatsAppE164(input.phone),
+  };
+
   return db.$transaction(async (tx) => {
     // Every producer uses this lifecycle function. The account-scoped transaction
     // lock serializes queue insertion so ETAs stay ordered and active-phone checks
     // cannot race. The partial unique DB index remains the final duplicate guard.
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`whatsapp-account:${input.accountId}`}))`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`whatsapp-account:${normalizedInput.accountId}`}))`;
 
     const account = await tx.whatsAppAccount.findUnique({
-      where: { id: input.accountId },
+      where: { id: normalizedInput.accountId },
       select: {
         id: true,
         minDelaySeconds: true,
@@ -82,9 +90,9 @@ export async function queueWhatsAppMessage(input: QueueWhatsAppInput) {
 
     if (!account) throw new Error("WhatsApp account was not found.");
 
-    const callLead = await findOrCreateCallLead(tx, input);
+    const callLead = await findOrCreateCallLead(tx, normalizedInput);
     const existingLead = await tx.whatsAppLead.findFirst({
-      where: { phone: input.phone, deletedAt: null },
+      where: { phone: normalizedInput.phone, deletedAt: null },
       orderBy: { createdAt: "asc" },
       select: { id: true, status: true, formToken: true },
     });
@@ -92,7 +100,7 @@ export async function queueWhatsAppMessage(input: QueueWhatsAppInput) {
     // FormSubmission is the source of truth. Denormalized lead timestamps are informational only.
     const submittedForm = await tx.formSubmission.findFirst({
       where: {
-        phone: input.phone,
+        phone: normalizedInput.phone,
         status: "FORM_SUBMITTED",
         deletedAt: null,
       },
@@ -112,7 +120,7 @@ export async function queueWhatsAppMessage(input: QueueWhatsAppInput) {
 
     const activeQueueItem = await tx.whatsAppQueueItem.findFirst({
       where: {
-        phone: input.phone,
+        phone: normalizedInput.phone,
         status: { in: [...ACTIVE_QUEUE_STATUSES] },
         isArchived: false,
         deletedAt: null,
@@ -123,23 +131,23 @@ export async function queueWhatsAppMessage(input: QueueWhatsAppInput) {
 
     if (activeQueueItem) {
       if (
-        input.source === "auto_answered" &&
+        normalizedInput.source === "auto_answered" &&
         activeQueueItem.status === "QUEUED" &&
-        input.message
+        normalizedInput.message
       ) {
         await tx.whatsAppQueueItem.update({
           where: { id: activeQueueItem.id },
           data: {
-            displayName: input.displayName,
-            message: input.message,
+            displayName: normalizedInput.displayName,
+            message: normalizedInput.message,
             callLeadId: callLead.id,
           },
         });
         await tx.whatsAppLead.update({
           where: { id: activeQueueItem.whatsappLeadId },
           data: {
-            displayName: input.displayName,
-            message: input.message,
+            displayName: normalizedInput.displayName,
+            message: normalizedInput.message,
             status: "QUEUED",
             lastError: null,
           },
@@ -186,12 +194,12 @@ export async function queueWhatsAppMessage(input: QueueWhatsAppInput) {
       ? await tx.whatsAppLead.update({
           where: { id: existingLead.id },
           data: {
-            accountId: input.accountId,
-            preferredAccountId: input.accountId,
-            displayName: input.displayName,
-            message: input.message ?? null,
+            accountId: normalizedInput.accountId,
+            preferredAccountId: normalizedInput.accountId,
+            displayName: normalizedInput.displayName,
+            message: normalizedInput.message ?? null,
             status: "QUEUED",
-            consentAt: input.consentAt ?? new Date(),
+            consentAt: normalizedInput.consentAt ?? new Date(),
             lastError: null,
             ...(reuseToken ? {} : { formToken }),
           },
@@ -199,13 +207,13 @@ export async function queueWhatsAppMessage(input: QueueWhatsAppInput) {
         })
       : await tx.whatsAppLead.create({
           data: {
-            accountId: input.accountId,
-            preferredAccountId: input.accountId,
-            phone: input.phone,
-            displayName: input.displayName,
-            message: input.message ?? null,
+            accountId: normalizedInput.accountId,
+            preferredAccountId: normalizedInput.accountId,
+            phone: normalizedInput.phone,
+            displayName: normalizedInput.displayName,
+            message: normalizedInput.message ?? null,
             status: "QUEUED",
-            consentAt: input.consentAt ?? new Date(),
+            consentAt: normalizedInput.consentAt ?? new Date(),
             formToken,
           },
           select: { id: true },
@@ -213,12 +221,12 @@ export async function queueWhatsAppMessage(input: QueueWhatsAppInput) {
 
     const queueItem = await tx.whatsAppQueueItem.create({
       data: {
-        accountId: input.accountId,
+        accountId: normalizedInput.accountId,
         whatsappLeadId: whatsappLead.id,
         callLeadId: callLead.id,
-        phone: input.phone,
-        displayName: input.displayName,
-        message: input.message ?? null,
+        phone: normalizedInput.phone,
+        displayName: normalizedInput.displayName,
+        message: normalizedInput.message ?? null,
         status: "QUEUED",
         formToken,
         sendAfterAt,
@@ -234,7 +242,9 @@ export async function queueWhatsAppMessage(input: QueueWhatsAppInput) {
         metadata: {
           whatsappLeadId: whatsappLead.id,
           queueItemId: queueItem.id,
-          source: input.source ?? "system",
+          source: normalizedInput.source ?? "system",
+          routingReason: normalizedInput.routingReason,
+          routingWarning: normalizedInput.routingWarning,
           sendAfterAt: sendAfterAt.toISOString(),
         },
       },

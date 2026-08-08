@@ -1,6 +1,11 @@
 import "server-only";
 
 import { db } from "./db";
+import {
+  chooseDeferredWhatsAppAccount,
+  isDeferredWhatsAppStatus,
+} from "./whatsapp-routing-policy";
+import { normalizeWhatsAppE164 } from "./whatsapp-phone.mjs";
 
 const ACTIVE_QUEUE_STATUSES = ["QUEUED", "SENDING"] as const;
 
@@ -11,10 +16,13 @@ const ACTIVE_QUEUE_STATUSES = ["QUEUED", "SENDING"] as const;
  * CONNECTED).
  */
 const HEARTBEAT_STALE_MS = 5 * 60 * 1000; // 5 minutes
+const COMPANY_PHONE_STALE_MS = 15 * 60 * 1000;
 
-type PickerResult = {
+export type PickerResult = {
   accountId: string;
   reason: string;
+  deferred?: boolean;
+  warning?: string;
 };
 
 type EligibleAccount = {
@@ -102,6 +110,7 @@ function isAccountEligible(account: EligibleAccount): { eligible: boolean; reaso
 export async function pickWhatsAppAccount(
   leadPhone: string,
 ): Promise<PickerResult | null> {
+  leadPhone = normalizeWhatsAppE164(leadPhone);
   const now = new Date();
   const todayStart = new Date(now);
   todayStart.setHours(0, 0, 0, 0);
@@ -239,12 +248,127 @@ export async function pickWhatsAppAccount(
 }
 
 /**
+ * Resolve the sender for an incoming call.
+ *
+ * A CompanyPhone mapping is authoritative and is kept even while its worker is
+ * disconnected. This lets queueWhatsAppMessage persist the message for later
+ * instead of silently losing it or leaking it to the wrong mobile.
+ *
+ * Unmapped legacy phones first use the normal healthy-account picker. When all
+ * workers are offline, their existing sticky account (or the least recently
+ * assigned enabled account) is used as a durable fallback.
+ */
+export async function pickWhatsAppAccountForCall(
+  companyPhoneId: string,
+  leadPhone: string,
+): Promise<PickerResult | null> {
+  leadPhone = normalizeWhatsAppE164(leadPhone);
+  const companyPhone = await db.companyPhone.findUnique({
+    where: { id: companyPhoneId },
+    select: {
+      label: true,
+      isActive: true,
+      lastSeenAt: true,
+      whatsappAccount: {
+        select: {
+          id: true,
+          label: true,
+          status: true,
+          autoReplyEnabled: true,
+        },
+      },
+    },
+  });
+
+  const mapped = companyPhone?.whatsappAccount;
+  if (mapped) {
+    if (!mapped.autoReplyEnabled) {
+      console.log(
+        "[account-picker] Auto-reply is disabled for mapped account " +
+          mapped.label + " (" + companyPhone?.label + ").",
+      );
+      return null;
+    }
+
+    const now = new Date();
+    await db.$transaction([
+      db.whatsAppAccount.update({
+        where: { id: mapped.id },
+        data: { lastAssignedAt: now },
+      }),
+      db.whatsAppLead.updateMany({
+        where: { phone: leadPhone, deletedAt: null },
+        data: { preferredAccountId: mapped.id },
+      }),
+    ]);
+
+    const stale =
+      !companyPhone.isActive ||
+      !companyPhone.lastSeenAt ||
+      Date.now() - companyPhone.lastSeenAt.getTime() > COMPANY_PHONE_STALE_MS;
+    const warning = stale
+      ? `Company phone "${companyPhone.label}" is stale or inactive; sender mapping was preserved.`
+      : undefined;
+
+    if (warning) console.warn(`[account-picker] ${warning}`);
+
+    return {
+      accountId: mapped.id,
+      reason: "company-phone mapping: " + companyPhone?.label + " -> " + mapped.label,
+      deferred: isDeferredWhatsAppStatus(mapped.status),
+      warning,
+    };
+  }
+
+  const healthy = await pickWhatsAppAccount(leadPhone);
+  if (healthy) return healthy;
+
+  const existingLead = await db.whatsAppLead.findFirst({
+    where: { phone: leadPhone, deletedAt: null },
+    orderBy: { createdAt: "asc" },
+    select: { preferredAccountId: true },
+  });
+
+  const fallbackAccounts = await db.whatsAppAccount.findMany({
+    where: {
+      autoReplyEnabled: true,
+      status: { notIn: ["PAUSED", "ERROR"] },
+    },
+    select: { id: true, label: true, lastAssignedAt: true, createdAt: true },
+  });
+
+  const fallback = chooseDeferredWhatsAppAccount(
+    fallbackAccounts,
+    existingLead?.preferredAccountId,
+  );
+  if (!fallback) return null;
+
+  await db.whatsAppAccount.update({
+    where: { id: fallback.id },
+    data: { lastAssignedAt: new Date() },
+  });
+
+  console.warn(
+    "[account-picker] Company phone " + (companyPhone?.label ?? companyPhoneId) +
+      " is not mapped. Queueing " + leadPhone + " on " + fallback.label +
+      " until a worker is connected.",
+  );
+
+  return {
+    accountId: fallback.id,
+    reason: "unmapped deferred fallback: " + fallback.label,
+    deferred: true,
+  };
+}
+
+/**
  * Get the preferred account for a specific lead phone. Used by lifecycle
  * functions when the lead already exists and has a sticky assignment.
  */
 export async function getPreferredAccountForLead(
   leadPhone: string,
 ): Promise<string | null> {
+  leadPhone = normalizeWhatsAppE164(leadPhone);
   const lead = await db.whatsAppLead.findFirst({
     where: { phone: leadPhone, deletedAt: null },
     orderBy: { createdAt: "asc" },

@@ -3,6 +3,7 @@ import { db } from "@/app/lib/db";
 import { WhatsAppConnectionStatus } from "@/app/lib/prisma-enums";
 import { validateBody } from "@/app/lib/validators/validate";
 import { whatsappBridgePayloadSchema } from "@/app/lib/validators/whatsapp";
+import { resolveBridgeStatus } from "@/app/lib/whatsapp-bridge-state";
 
 function unauthorized() {
   return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -45,10 +46,10 @@ export async function POST(request: Request) {
   const updated = await db.whatsAppAccount.update({
     where: { id: account.id },
     data: {
-      status,
-      qrCodeData: payload.qrCodeData,
+      status: resolveBridgeStatus(account.status, status, payload.heartbeatOnly === true),
+      qrCodeData: payload.heartbeatOnly ? undefined : payload.qrCodeData,
       phoneNumber: payload.phoneNumber,
-      lastError: payload.lastError,
+      lastError: payload.heartbeatOnly ? undefined : payload.lastError,
       lastConnectedAt: status === WhatsAppConnectionStatus.CONNECTED ? new Date() : undefined,
       // Update heartbeat on every bridge call so the picker knows the worker is alive
       lastHeartbeatAt: new Date(),

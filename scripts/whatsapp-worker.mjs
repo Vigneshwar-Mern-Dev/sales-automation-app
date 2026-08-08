@@ -1,17 +1,29 @@
 import process from "node:process";
 import "dotenv/config";
 import pkg from "whatsapp-web.js";
+import {
+  getProviderMessageId,
+  phoneFromWhatsAppId,
+  toWhatsAppId,
+} from "./whatsapp-worker-utils.mjs";
 const { Client, LocalAuth } = pkg;
 
 const CRM_BASE_URL = process.env.CRM_BASE_URL || "http://127.0.0.1:3000";
 const BRIDGE_TOKEN = process.env.WHATSAPP_BRIDGE_TOKEN;
 let ACCOUNT_ID = process.env.WHATSAPP_ACCOUNT_ID || undefined;
-const WORKER_ID = ACCOUNT_ID || "primary";
 const POLL_MS = Number.parseInt(process.env.WHATSAPP_POLL_MS || "10000", 10);
 const SEND_TYPING = process.env.WHATSAPP_SEND_TYPING !== "false";
 
 if (!BRIDGE_TOKEN) {
   console.error("WHATSAPP_BRIDGE_TOKEN is required.");
+  process.exit(1);
+}
+
+if (!ACCOUNT_ID) {
+  console.error(
+    "WHATSAPP_ACCOUNT_ID is required. Start scripts/whatsapp-worker-manager.mjs " +
+      "to supervise all configured accounts.",
+  );
   process.exit(1);
 }
 
@@ -257,43 +269,67 @@ async function postInboxReply(phone, message) {
 
 // ── Phone number helpers ─────────────────────────────────────────────────────
 
-function toWhatsAppId(phone) {
-  const digits = String(phone || "").replace(/\D/g, "");
-  return `${digits}@c.us`;
-}
-
-function fromWhatsAppId(chatId) {
   // "919876543210@c.us" → "+919876543210"
-  const digits = String(chatId || "").split("@")[0];
-  return digits ? `+${digits}` : null;
-}
 
 // ── WhatsApp client setup ────────────────────────────────────────────────────
 
-const AUTH_DATA_PATH = `.whatsapp-auth-${ACCOUNT_ID}`;
+async function resolveIncomingPhone(msg) {
+  const rawId = msg.author || msg.from;
+  const directPhone = phoneFromWhatsAppId(rawId);
+  if (directPhone) return directPhone;
 
-const client = new Client({
-  authStrategy: new LocalAuth({
-    clientId: ACCOUNT_ID,
-    dataPath: AUTH_DATA_PATH,
-  }),
-  webVersionCache: {
-    type: "remote",
-    remotePath: "https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html",
-  },
-  puppeteer: {
-    headless: process.env.WHATSAPP_HEADLESS !== "false",
-    protocolTimeout: 300000, // 5 minutes
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--no-zygote",
-      "--disable-extensions",
-    ],
-  },
-});
+  try {
+    const contact = await withTimeout(msg.getContact(), 15000, "Incoming contact lookup timed out");
+    const contactPhone =
+      phoneFromWhatsAppId(contact?.id?._serialized) ||
+      phoneFromWhatsAppId(contact?.number ? `${contact.number}@c.us` : null);
+    if (contactPhone) return contactPhone;
+  } catch (error) {
+    console.warn(`[inbox] Contact lookup failed for ${rawId}:`, error.message || error);
+  }
+
+  try {
+    const mappings = await withTimeout(
+      client.getContactLidAndPhone([rawId]),
+      15000,
+      "Incoming LID lookup timed out",
+    );
+    return phoneFromWhatsAppId(mappings?.[0]?.pn);
+  } catch (error) {
+    console.warn(`[inbox] LID lookup failed for ${rawId}:`, error.message || error);
+    return null;
+  }
+}
+
+let AUTH_DATA_PATH = null;
+let client = null;
+
+function createClient() {
+  if (!ACCOUNT_ID) {
+    throw new Error("Cannot initialize WhatsApp before resolving an account ID.");
+  }
+
+  AUTH_DATA_PATH = `.whatsapp-auth-${ACCOUNT_ID}`;
+
+  return new Client({
+    authStrategy: new LocalAuth({
+      clientId: ACCOUNT_ID,
+      dataPath: AUTH_DATA_PATH,
+    }),
+    puppeteer: {
+      headless: process.env.WHATSAPP_HEADLESS !== "false",
+      protocolTimeout: 300000, // 5 minutes
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--no-zygote",
+        "--disable-extensions",
+      ],
+    },
+  });
+}
 
 let ready = false;
 let sending = false;
@@ -330,12 +366,15 @@ async function handleReconnect(reason = "Connection lost") {
   await postBridge({ status: "CONNECTING", lastError: `Reconnecting (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...` }).catch(() => {});
 
   setTimeout(async () => {
+    let initializingClient = null;
     try {
       console.log("[worker] Destroying client...");
-      await client.destroy().catch(() => {});
+      clearInitTimeout();
+      const previousClient = client;
+      await previousClient?.destroy().catch(() => {});
 
       // If it was an authentication failure, clear the auth directory to force a clean login/QR
-      if (reason.toLowerCase().includes("auth") || reason.toLowerCase().includes("fail")) {
+      if (reason.toLowerCase().includes("auth")) {
         console.log("[worker] Clearing auth session directory due to auth failure...");
         const fs = await import("fs");
         if (fs.existsSync(AUTH_DATA_PATH)) {
@@ -344,12 +383,15 @@ async function handleReconnect(reason = "Connection lost") {
       }
 
       console.log("[worker] Re-initializing client...");
-      await client.initialize();
+      initializingClient = createClient();
+      client = initializingClient;
+      registerClientEventHandlers(initializingClient);
       startInitTimeout();
+      await initializingClient.initialize();
       // Note: `reconnecting` will be cleared when `ready` event fires (sets reconnecting = false)
       // If init succeeds but `ready` never fires, the init timeout (below) will catch it
-      reconnecting = false;
     } catch (err) {
+      if (initializingClient && initializingClient !== client) return;
       console.error("[worker] Reconnection initialization failed:", err);
       reconnecting = false;
       // Schedule next attempt (recursive, uses backoff)
@@ -369,6 +411,7 @@ function startInitTimeout() {
   initTimeoutId = setTimeout(() => {
     if (!ready && !isShuttingDown) {
       console.error("[worker] Initialization timed out after 120s. Forcing reconnect.");
+      reconnecting = false;
       handleReconnect("Initialization timeout — ready event never fired");
     }
   }, INIT_TIMEOUT_MS);
@@ -403,9 +446,8 @@ function startHealthCheck() {
 
       // Also ping the bridge to keep the server aware we're alive
       await postBridge({
-        status: "CONNECTED",
+        heartbeatOnly: true,
         phoneNumber: info?.wid?.user || null,
-        lastError: null,
       }).catch(() => {});
     } catch (err) {
       console.error("[health] Health check failed:", err.message || err);
@@ -423,24 +465,28 @@ function stopHealthCheck() {
 
 // ── WhatsApp event handlers ──────────────────────────────────────────────────
 
-client.on("qr", async (qr) => {
+function registerClientEventHandlers(eventClient) {
+eventClient.on("qr", async (qr) => {
+  if (eventClient !== client) return;
   ready = false;
   console.log("QR received. Open /admin/whatsapp and scan it.");
   await postBridge({ status: "QR_REQUIRED", qrCodeData: qr, lastError: null });
 });
 
-client.on("authenticated", async () => {
+eventClient.on("authenticated", async () => {
+  if (eventClient !== client) return;
   console.log("WhatsApp authenticated.");
   await postBridge({ status: "CONNECTING", qrCodeData: null, lastError: null });
 });
 
-client.on("ready", async () => {
+eventClient.on("ready", async () => {
+  if (eventClient !== client) return;
   ready = true;
   reconnectAttempts = 0; // Reset reconnection attempts on successful connection
   reconnecting = false;
   clearInitTimeout();
   clearDisconnectAlertTimer();
-  const info = client.info;
+  const info = eventClient.info;
   console.log("WhatsApp ready.");
   await postBridge({
     status: "CONNECTED",
@@ -451,7 +497,8 @@ client.on("ready", async () => {
   startHealthCheck();
 });
 
-client.on("disconnected", async (reason) => {
+eventClient.on("disconnected", async (reason) => {
+  if (eventClient !== client) return;
   ready = false;
   stopHealthCheck();
   console.error("WhatsApp disconnected:", reason);
@@ -462,7 +509,8 @@ client.on("disconnected", async (reason) => {
   }
 });
 
-client.on("auth_failure", async (msg) => {
+eventClient.on("auth_failure", async (msg) => {
+  if (eventClient !== client) return;
   console.error("WhatsApp authentication failure:", msg);
   stopHealthCheck();
   await postBridge({ status: "ERROR", lastError: "Auth failure: " + String(msg) }).catch(() => {});
@@ -471,20 +519,25 @@ client.on("auth_failure", async (msg) => {
 });
 
 // ── Incoming message listener (reply detection) ──────────────────────────────
-client.on("message", async (msg) => {
+eventClient.on("message", async (msg) => {
+  if (eventClient !== client) return;
   // Ignore: outgoing, status updates, group messages, broadcasts
   if (msg.fromMe) return;
   if (msg.isStatus) return;
   if (msg.from.endsWith("@g.us")) return;  // group
   if (msg.from.endsWith("@broadcast")) return;
 
-  const phone = fromWhatsAppId(msg.from);
+  const phone = await resolveIncomingPhone(msg);
 
-  if (!phone) return;
+  if (!phone) {
+    console.warn(`[inbox] Ignoring message because ${msg.from} could not be resolved to a phone number.`);
+    return;
+  }
 
   console.log(`[inbox] Received reply from ${phone}: "${msg.body?.slice(0, 60)}"`);
   await postInboxReply(phone, msg.body || "");
 });
+}
 
 // ── Outbound sending loop ────────────────────────────────────────────────────
 async function sendNextLead() {
@@ -501,7 +554,7 @@ async function sendNextLead() {
     if (!outbox.ok) return;
 
     if (outbox.logoutRequested || outbox.qrRequested) {
-      console.log(`[worker:${WORKER_ID}] ${outbox.qrRequested ? "QR request" : "Logout request"} received. Resetting session auth for new QR...`);
+      console.log(`[worker:${ACCOUNT_ID || "primary"}] ${outbox.qrRequested ? "QR request" : "Logout request"} received. Resetting session auth for new QR...`);
       await postBridge({ status: "QR_REQUIRED", qrCodeData: null, lastError: null }).catch(() => {});
       try {
         await client.logout();
@@ -528,33 +581,54 @@ async function sendNextLead() {
 
     const chatId = toWhatsAppId(outbox.lead.phone);
 
-    // Validate if user has a registered WhatsApp account before interacting
-    let isRegistered = false;
-    try {
-      isRegistered = await withTimeout(client.isRegisteredUser(chatId), 30000, "Registration check timed out");
-    } catch (regErr) {
-      console.warn(`[worker] Registration check failed for ${chatId}:`, regErr.message || regErr);
+    // Resolve the canonical WhatsApp ID before sending. A lookup error is
+    // temporary and must not be misclassified as an unregistered number.
+    let registeredId = null;
+    let lastRegistrationError = null;
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        registeredId = await withTimeout(
+          client.getNumberId(chatId),
+          30000,
+          "Registration check timed out",
+        );
+        if (registeredId) break;
+      } catch (regErr) {
+        lastRegistrationError = regErr;
+        console.warn(
+          `[worker] Registration check ${attempt}/3 failed for ${chatId}:`,
+          regErr.message || regErr,
+        );
+      }
+
+      if (attempt < 3) {
+        await sleep(attempt * 1500);
+      }
     }
 
-    if (!isRegistered) {
-      // This is a DATA error — the phone number isn't on WhatsApp.
-      // Report as INVALID_NUMBER so it does NOT increment consecutive failures.
-      const errMsg = `Phone number ${outbox.lead.phone} is not registered on WhatsApp.`;
-      console.warn(`[worker] ${errMsg}`);
-      await reportOutboxResultWithRetry(
-        currentLeadId,
-        false,
-        errMsg,
-        "INVALID_NUMBER",
-      ).catch(() => {});
-      return; // Skip the rest, don't throw
+    if (!registeredId && lastRegistrationError) {
+      console.warn(
+        `[worker] Registration lookup was unavailable for ${outbox.lead.phone}; attempting delivery with the normalized chat ID.`,
+      );
+    } else if (!registeredId) {
+      console.warn(
+        `[worker] Registration lookup returned no ID for ${outbox.lead.phone}; attempting delivery instead of rejecting the number.`,
+      );
     }
+
+    // The lookup is not authoritative. sendMessage provides the real delivery
+    // result and avoids falsely labelling valid numbers as unregistered.
+    const resolvedChatId = registeredId?._serialized || chatId;
+    console.log(
+      `[outbox] Sending ${outbox.lead.id} to ${outbox.lead.phone} using ${resolvedChatId}.`,
+    );
 
     let chat = null;
     try {
-      chat = await withTimeout(client.getChatById(chatId), 30000, "Get chat timed out");
+      chat = await withTimeout(client.getChatById(resolvedChatId), 30000, "Get chat timed out");
     } catch (chatErr) {
-      console.warn(`[worker] Could not get chat for ${chatId} (likely new contact):`, chatErr.message || chatErr);
+      console.warn(`[worker] Could not get chat for ${resolvedChatId} (likely new contact):`, chatErr.message || chatErr);
     }
 
     if (SEND_TYPING && chat) {
@@ -572,12 +646,16 @@ async function sendNextLead() {
     }
 
     const sentMessage = await withTimeout(
-      client.sendMessage(chatId, outbox.lead.message),
+      client.sendMessage(resolvedChatId, outbox.lead.message, { waitUntilMsgSent: true }),
       60000,
       "sendMessage timed out",
     );
+    // whatsapp-web.js can finish waitUntilMsgSent successfully but return
+    // undefined when the just-sent message is missing from its local cache.
+    // The resolved send promise is the delivery result; the provider ID is
+    // useful metadata, not a second success condition.
+    providerMessageId = getProviderMessageId(sentMessage);
     messageDelivered = true;
-    providerMessageId = sentMessage?.id?._serialized || null;
     await reportOutboxResultWithRetry(
       outbox.lead.id,
       true,
@@ -585,7 +663,11 @@ async function sendNextLead() {
       null,
       providerMessageId,
     );
-    console.log(`Sent WhatsApp message to ${outbox.lead.phone}.`);
+    console.log(
+      providerMessageId
+        ? `Sent WhatsApp message to ${outbox.lead.phone}; provider ID ${providerMessageId}.`
+        : `Sent WhatsApp message to ${outbox.lead.phone}; provider ID was unavailable from the local cache.`,
+    );
   } catch (error) {
     console.error(error);
     const message = error instanceof Error ? error.message : "Unknown worker error";
@@ -678,7 +760,7 @@ process.on("uncaughtException", async (err) => {
 
 // ── Startup ──────────────────────────────────────────────────────────────────
 
-console.log(`[worker:${WORKER_ID}] Starting WhatsApp worker for ${CRM_BASE_URL}... Waiting for server to be ready.`);
+console.log(`[worker:${ACCOUNT_ID || "primary"}] Starting WhatsApp worker for ${CRM_BASE_URL}... Waiting for server to be ready.`);
 
 (async () => {
   // Wait for the Next.js server to be fully up before starting WhatsApp
@@ -708,6 +790,17 @@ console.log(`[worker:${WORKER_ID}] Starting WhatsApp worker for ${CRM_BASE_URL}.
   }
 
   console.log("Server is ready. Initializing WhatsApp client...");
+  const initialClient = createClient();
+  client = initialClient;
+  registerClientEventHandlers(initialClient);
   startInitTimeout(); // Start the 120s init watchdog
-  client.initialize();
+  try {
+    await initialClient.initialize();
+  } catch (error) {
+    if (initialClient !== client) return;
+    clearInitTimeout();
+    console.error("[worker] Initial client initialization failed:", error);
+    reconnecting = false;
+    await handleReconnect("Initial client initialization failed");
+  }
 })();

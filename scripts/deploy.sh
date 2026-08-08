@@ -21,6 +21,7 @@ SKIP_TESTS="${1:-}"
 SERVER_USER="planlecrm"
 SERVER_HOST="138.252.201.176"
 SERVER_DIR="/home/planlecrm/htdocs/crm.planle.com"
+PUBLIC_CRM_URL="https://crm.planle.com"
 SSH_KEY="${APP_DIR}/../aws-key.pem"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 TARBALL_NAME="crm-deploy-${TIMESTAMP}.tar.gz"
@@ -59,9 +60,9 @@ tar -czf "${APP_DIR}/../${TARBALL_NAME}" \
   --exclude='node_modules' \
   --exclude='.next' \
   --exclude='.env' \
-  --exclude='.whatsapp-auth' \
-  --exclude='.whatsapp-auth-new' \
-  --exclude='.wwebjs_cache' \
+  --exclude='.whatsapp-auth*' \
+  --exclude='.wwebjs_cache*' \
+  --exclude='.whatsapp-worker-manager.lock' \
   --exclude='.git' \
   --exclude='logs' \
   --exclude='*.log' \
@@ -116,6 +117,15 @@ ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no \
   "${SERVER_USER}@${SERVER_HOST}" << REMOTE_SCRIPT
 set -euo pipefail
 cd "${SERVER_DIR}"
+
+echo "[server] Enforcing the public customer URL..."
+for public_url_key in CRM_PUBLIC_URL NEXT_PUBLIC_CRM_URL; do
+  if grep -q "^${public_url_key}=" .env; then
+    sed -i "s|^${public_url_key}=.*|${public_url_key}=\${PUBLIC_CRM_URL}\|" .env
+  else
+    printf '%s="%s"\n' "${public_url_key}" "${PUBLIC_CRM_URL}" >> .env
+  fi
+done
 
 echo "[server] Extracting deployment archive..."
 tar -xzf "/tmp/${TARBALL_NAME}" --strip-components=1

@@ -2,7 +2,7 @@ import "server-only";
 
 import { db } from "./db";
 import { queueWhatsAppMessage } from "./whatsapp-lifecycle";
-import { pickWhatsAppAccount } from "./whatsapp-account-picker";
+import { pickWhatsAppAccountForCall } from "./whatsapp-account-picker";
 
 const ANSWERED_TEMPLATE = `Hi {{name}}!
 
@@ -33,16 +33,23 @@ export async function autoQueueWhatsAppForCaller(
   displayName: string,
   callState: "ANSWERED" | "MISSED",
   callLeadId?: string,
+  companyPhoneId?: string,
 ): Promise<void> {
   try {
-    // Use the capacity-aware picker instead of a single-account lookup.
-    // The picker handles sticky routing (preferredAccountId), capacity
-    // checks (daily/hourly caps, warmup), and health checks (heartbeat,
-    // consecutive failures).
-    const picked = await pickWhatsAppAccount(callerPhone);
+    if (!companyPhoneId) {
+      console.error(
+        "[whatsapp-auto-queue] Cannot route " + callerPhone + ": company phone ID is missing.",
+      );
+      return;
+    }
+
+    const picked = await pickWhatsAppAccountForCall(companyPhoneId, callerPhone);
 
     if (!picked) {
-      console.log(`[whatsapp-auto-queue] No eligible account for ${callerPhone}. Skipping.`);
+      console.log(
+        "[whatsapp-auto-queue] No enabled account for " + callerPhone +
+          ". Map the company phone or enable auto-reply.",
+      );
       return;
     }
 
@@ -96,11 +103,15 @@ export async function autoQueueWhatsAppForCaller(
       consentAt: new Date(),
       callLeadId,
       source: `auto_${callState.toLowerCase()}`,
+      routingReason: picked.reason,
+      routingWarning: picked.warning,
     });
 
     if (result.queued) {
       console.log(
-        `[whatsapp-auto-queue] Queued WhatsApp for ${callerPhone} (account=${account.id}, callLead=${callLeadId ?? "none"}, queueItem=${result.queueItemId}).`,
+        "[whatsapp-auto-queue] Queued WhatsApp for " + callerPhone +
+          " (account=" + account.id + ", callLead=" + (callLeadId ?? "none") +
+          ", queueItem=" + result.queueItemId + ", deferred=" + Boolean(picked.deferred) + ").",
       );
     } else {
       console.log(

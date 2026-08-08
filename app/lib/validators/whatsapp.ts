@@ -6,6 +6,7 @@ import {
   normalizedPhoneString,
   optionalTrimmedString,
   optionalIsoDate,
+  optionalBoolean,
 } from "./common";
 
 const whatsappConnectionStatusValues = Object.values(WhatsAppConnectionStatus) as [
@@ -15,6 +16,7 @@ const whatsappConnectionStatusValues = Object.values(WhatsAppConnectionStatus) a
 
 export const whatsappBridgePayloadSchema = z.object({
   accountId: optionalTrimmedString,
+  heartbeatOnly: optionalBoolean,
   status: z
     .preprocess(
       (value) => (typeof value === "string" ? value.trim().toUpperCase() : value),

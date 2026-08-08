@@ -64,6 +64,17 @@ export async function ensureWhatsAppAccount() {
 export async function getWhatsAppAccounts() {
   return db.whatsAppAccount.findMany({
     orderBy: { createdAt: "asc" },
+    include: {
+      companyPhone: {
+        select: {
+          id: true,
+          label: true,
+          phoneNumber: true,
+          lastSeenAt: true,
+          isActive: true,
+        },
+      },
+    },
   });
 }
 
@@ -90,6 +101,50 @@ export async function createWhatsAppAccountAction(formData: FormData) {
 
   revalidatePath("/admin/whatsapp");
   revalidatePath("/admin/whatsapp/settings");
+}
+
+/** Admin-only: map one Android call-tracker phone to one WhatsApp sender. */
+export async function mapCompanyPhoneToWhatsAppAction(formData: FormData) {
+  await requireRole("ADMIN");
+  const accountId = formString(formData, "accountId");
+  const companyPhoneId = formString(formData, "companyPhoneId");
+  if (!accountId) return;
+
+  const account = await db.whatsAppAccount.findUnique({
+    where: { id: accountId },
+    select: { id: true },
+  });
+  if (!account) return;
+
+  if (!companyPhoneId) {
+    await db.companyPhone.updateMany({
+      where: { whatsappAccountId: account.id },
+      data: { whatsappAccountId: null },
+    });
+  } else {
+    const companyPhone = await db.companyPhone.findFirst({
+      where: { id: companyPhoneId, isActive: true },
+      select: { id: true },
+    });
+    if (!companyPhone) return;
+
+    await db.$transaction(async (tx) => {
+      await tx.companyPhone.updateMany({
+        where: {
+          whatsappAccountId: account.id,
+          id: { not: companyPhone.id },
+        },
+        data: { whatsappAccountId: null },
+      });
+      await tx.companyPhone.update({
+        where: { id: companyPhone.id },
+        data: { whatsappAccountId: account.id },
+      });
+    });
+  }
+
+  revalidatePath("/admin/whatsapp");
+  revalidatePath("/admin/calls/phones");
 }
 
 /** Admin-only: soft-delete a WhatsApp account and cancel its pending queue. */
@@ -198,7 +253,10 @@ export async function pauseWhatsAppAction(formData: FormData) {
 
   await db.whatsAppAccount.update({
     where: { id: accountId },
-    data: { status: WhatsAppConnectionStatus.PAUSED },
+    data: {
+      status: WhatsAppConnectionStatus.PAUSED,
+      autoReplyEnabled: false,
+    },
   });
 
   revalidatePath("/admin/whatsapp");
@@ -544,6 +602,7 @@ export async function resumeWhatsAppAction(formData: FormData) {
     where: { id: accountId },
     data: {
       status: WhatsAppConnectionStatus.CONNECTING,
+      autoReplyEnabled: true,
       consecutiveFailures: 0,
       lastError: null,
     },
@@ -577,6 +636,7 @@ export async function manualQueueWhatsAppForCallLeadAction(callLeadId: string) {
     consentAt: new Date(),
     callLeadId: callLead.id,
     source: "manual_call_lead",
+    routingReason: picked.reason,
   });
 
   revalidatePath("/admin/calls/leads");

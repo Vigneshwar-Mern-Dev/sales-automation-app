@@ -1,5 +1,3 @@
-import "server-only";
-
 const ACTIVE_QUEUE_STATUSES = new Set(["QUEUED", "SENDING"]);
 const NON_RETRYABLE_LEAD_STATUSES = new Set([
   "SENT",
@@ -14,11 +12,8 @@ const NON_RETRYABLE_LEAD_STATUSES = new Set([
 const NON_RETRYABLE_NUMBER_ERROR_PATTERNS = [
   "invalid_number",
   "invalid number",
-  "not a valid",
-  "not on whatsapp",
-  "not registered",
-  "number not found",
-  "phone number is not registered",
+  "invalid phone",
+  "wid is invalid",
 ];
 
 export type RetryEligibility = {

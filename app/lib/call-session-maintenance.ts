@@ -24,7 +24,7 @@ export async function expireStaleRingingCalls() {
       leadId: true,
       callerNumber: true,
       callDirection: true,
-      companyPhone: { select: { phoneNumber: true } },
+      companyPhone: { select: { id: true, phoneNumber: true } },
       lead: { select: { displayName: true } },
     },
     orderBy: { firstRingAt: "asc" },
@@ -76,6 +76,7 @@ export async function expireStaleRingingCalls() {
         call.lead.displayName,
         "MISSED",
         call.leadId,
+        call.companyPhone.id,
       );
     }
   }

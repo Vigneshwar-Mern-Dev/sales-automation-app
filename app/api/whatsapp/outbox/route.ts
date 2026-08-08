@@ -160,7 +160,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ ok: true, qrRequested: true });
   }
 
-  if (account.status === "PAUSED" || account.status === "ERROR") {
+  if (!account.autoReplyEnabled || account.status === "PAUSED" || account.status === "ERROR") {
     return NextResponse.json({ ok: true, paused: true });
   }
 
@@ -548,6 +548,7 @@ export async function POST(request: Request) {
             ...(shouldPause
               ? {
                   status: WhatsAppConnectionStatus.PAUSED,
+                  autoReplyEnabled: false,
                   lastError: `Auto-paused after ${newCount} consecutive send failures. Check your connection and resume manually.`,
                 }
               : {}),

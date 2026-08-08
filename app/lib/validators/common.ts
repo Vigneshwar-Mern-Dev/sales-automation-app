@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { normalizeWhatsAppE164 } from "../whatsapp-phone.mjs";
 
 export const nonEmptyTrimmedString = z.string().trim().min(1, "Required.");
 
@@ -58,17 +59,7 @@ export const optionalIsoDate = z.preprocess(
 );
 
 export function normalizePhoneNumber(value: string) {
-  const digits = value.replace(/\D/g, "");
-
-  if (digits.length === 10) {
-    return `+91${digits}`;
-  }
-
-  if (digits.length === 12 && digits.startsWith("91")) {
-    return `+${digits}`;
-  }
-
-  return `+${digits}`;
+  return normalizeWhatsAppE164(value);
 }
 
 export const normalizedPhoneString = nonEmptyTrimmedString.transform(normalizePhoneNumber);

@@ -654,6 +654,7 @@ export async function ingestCallEvent(input: CallTrackerEventInput) {
         txResult.callerDisplayName,
         callState,
         txResult.leadId,
+        companyPhone.id,
       );
     } catch (err) {
       console.error("[call-tracker] WhatsApp auto-queue error:", err);
