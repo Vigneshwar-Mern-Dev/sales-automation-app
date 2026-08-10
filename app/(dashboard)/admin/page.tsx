@@ -70,7 +70,7 @@ async function getOverviewData() {
           createdAt: true,
         },
       }),
-      db.whatsAppQueueItem.count({ where: { status: "SENT", sentAt: { gte: todayStart }, deletedAt: null, isArchived: false } }),
+      db.whatsAppQueueItem.count({ where: { sentAt: { gte: todayStart }, deletedAt: null, isArchived: false } }),
       db.whatsAppQueueItem.count({ where: { status: { in: ["QUEUED", "SENDING"] }, deletedAt: null, isArchived: false } }),
       db.whatsAppLead.count({ where: { OR: [{ status: WhatsAppLeadStatus.REPLIED }, { lastReplyAt: { not: null } }], deletedAt: null, isArchived: false } }),
     ]);

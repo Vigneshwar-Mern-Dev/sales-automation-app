@@ -20,6 +20,24 @@ npm run prisma:deploy
 npm run build
 pm2 startOrReload ecosystem.config.js --update-env
 
+if node -e "require('dotenv').config(); process.exit(process.env.WHATSAPP_WORKER_ENABLED === 'true' ? 0 : 1)"; then
+  # Force the manager and all child senders to load the newly deployed worker code.
+  pm2 restart crm-whatsapp-workers --update-env
+
+  worker_check_ok=false
+  for _attempt in $(seq 1 12); do
+    if npm run whatsapp:workers:check; then
+      worker_check_ok=true
+      break
+    fi
+    sleep 5
+  done
+  if [[ "$worker_check_ok" != "true" ]]; then
+    echo "WhatsApp worker manager could not reach the CRM account API after restart." >&2
+    exit 1
+  fi
+fi
+
 if ! pm2 describe pm2-logrotate >/dev/null 2>&1; then
   pm2 install pm2-logrotate
 fi

@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "concurrently --kill-others-on-fail --names next,workers npm:dev:next npm:dev:worker",
+    "dev": "next dev",
+    "dev:with-local-workers": "concurrently --kill-others-on-fail --names next,workers npm:dev:next npm:dev:worker",
     "dev:next": "next dev",
     "dev:worker": "node scripts/whatsapp-worker-manager.mjs",
     "build": "next build",
@@ -30,6 +31,7 @@
     "cleanup:login-attempts": "node scripts/cleanup-login-attempts.mjs",
     "cleanup:security": "node scripts/cleanup-login-attempts.mjs",
     "leads:reconcile-submitted": "node scripts/reconcile-submitted-leads.mjs",
+    "whatsapp:reconcile-delivery": "node scripts/reconcile-whatsapp-delivery.mjs",
     "setup:production": "bash scripts/setup-production.sh",
     "backup:encrypted": "bash scripts/create-encrypted-backup.sh",
     "migrate:calls-integration": "node scripts/migrate-calls-integration.mjs"

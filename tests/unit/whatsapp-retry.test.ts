@@ -35,7 +35,7 @@ describe("WhatsApp retry eligibility", () => {
     expect(isNonRetryableNumberFailure("Not registered on WhatsApp")).toBe(false);
   });
 
-  it("allows retry when an inbound reply arrived after the outbound send failed", () => {
+  it("does not retry when an inbound reply proves the customer is reachable", () => {
     const result = evaluateWhatsAppRetry({
       status: "REPLIED",
       lastError: null,
@@ -48,7 +48,8 @@ describe("WhatsApp retry eligibility", () => {
       ],
     });
 
-    expect(result).toEqual({ retryable: true, reasons: [] });
+    expect(result.retryable).toBe(false);
+    expect(result.reasons).toContain("Lead status is REPLIED");
   });
 
   it("does not retry a replied lead unless an outbound send actually failed", () => {
@@ -61,5 +62,20 @@ describe("WhatsApp retry eligibility", () => {
 
     expect(result.retryable).toBe(false);
     expect(result.reasons).toContain("No failed WhatsApp send state");
+  });
+
+  it("does not retry a later failure when an earlier attempt was delivered", () => {
+    const result = evaluateWhatsAppRetry({
+      status: "FAILED",
+      lastError: "Phone number is not registered on WhatsApp.",
+      formSubmissions: [],
+      queueItems: [
+        { status: "FAILED", lastError: "Phone number is not registered on WhatsApp." },
+        { status: "OPENED", lastError: null },
+      ],
+    });
+
+    expect(result.retryable).toBe(false);
+    expect(result.reasons).toContain("Message was already delivered");
   });
 });

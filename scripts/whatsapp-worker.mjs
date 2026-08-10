@@ -3,6 +3,8 @@ import "dotenv/config";
 import pkg from "whatsapp-web.js";
 import {
   getProviderMessageId,
+  findRecentOutgoingMessage,
+  pickMappedWhatsAppId,
   phoneFromWhatsAppId,
   toWhatsAppId,
 } from "./whatsapp-worker-utils.mjs";
@@ -607,6 +609,28 @@ async function sendNextLead() {
       }
     }
 
+    if (!registeredId) {
+      try {
+        const mappings = await withTimeout(
+          client.getContactLidAndPhone([chatId]),
+          30000,
+          "Phone/LID mapping timed out",
+        );
+        const mappedId = pickMappedWhatsAppId(mappings, outbox.lead.phone);
+        if (mappedId) {
+          registeredId = { _serialized: mappedId };
+          console.log(
+            `[worker] Resolved ${outbox.lead.phone} through WhatsApp phone/LID mapping as ${mappedId}.`,
+          );
+        }
+      } catch (mappingError) {
+        console.warn(
+          `[worker] Phone/LID mapping failed for ${outbox.lead.phone}:`,
+          mappingError.message || mappingError,
+        );
+      }
+    }
+
     if (!registeredId && lastRegistrationError) {
       console.warn(
         `[worker] Registration lookup was unavailable for ${outbox.lead.phone}; attempting delivery with the normalized chat ID.`,
@@ -645,16 +669,51 @@ async function sendNextLead() {
       }
     }
 
-    const sentMessage = await withTimeout(
+    const sendStartedAt = Date.now();
+    let sentMessage = await withTimeout(
       client.sendMessage(resolvedChatId, outbox.lead.message, { waitUntilMsgSent: true }),
       60000,
       "sendMessage timed out",
     );
-    // whatsapp-web.js can finish waitUntilMsgSent successfully but return
-    // undefined when the just-sent message is missing from its local cache.
-    // The resolved send promise is the delivery result; the provider ID is
-    // useful metadata, not a second success condition.
+
+    if (!getProviderMessageId(sentMessage)) {
+      for (let confirmationAttempt = 1; confirmationAttempt <= 3; confirmationAttempt++) {
+        await sleep(confirmationAttempt * 1000);
+        try {
+          const confirmationChat = await withTimeout(
+            client.getChatById(resolvedChatId),
+            30000,
+            "Delivery confirmation chat lookup timed out",
+          );
+          const recentMessages = await withTimeout(
+            confirmationChat.fetchMessages({ limit: 20 }),
+            30000,
+            "Delivery confirmation message lookup timed out",
+          );
+          const confirmedMessage = findRecentOutgoingMessage(
+            recentMessages,
+            outbox.lead.message,
+            sendStartedAt,
+          );
+          if (confirmedMessage) {
+            sentMessage = confirmedMessage;
+            break;
+          }
+        } catch (confirmationError) {
+          console.warn(
+            `[worker] Delivery confirmation ${confirmationAttempt}/3 failed for ${outbox.lead.phone}:`,
+            confirmationError.message || confirmationError,
+          );
+        }
+      }
+    }
+
     providerMessageId = getProviderMessageId(sentMessage);
+    if (!providerMessageId) {
+      throw new Error(
+        `WhatsApp did not confirm delivery to ${outbox.lead.phone}; no outgoing message was found after sendMessage.`,
+      );
+    }
     messageDelivered = true;
     await reportOutboxResultWithRetry(
       outbox.lead.id,

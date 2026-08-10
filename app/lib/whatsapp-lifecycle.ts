@@ -5,6 +5,7 @@ import { db } from "./db";
 import { generateUniqueFormToken } from "./short-token";
 import { moveOutsideWhatsAppQuietTime, randomDelaySeconds } from "./whatsapp-schedule";
 import { normalizeWhatsAppE164 } from "./whatsapp-phone.mjs";
+import { COMPLETED_WHATSAPP_QUEUE_STATUSES } from "./whatsapp-delivery-status";
 
 const ACTIVE_QUEUE_STATUSES = ["QUEUED", "SENDING"] as const;
 
@@ -76,6 +77,7 @@ export async function queueWhatsAppMessage(input: QueueWhatsAppInput) {
     // lock serializes queue insertion so ETAs stay ordered and active-phone checks
     // cannot race. The partial unique DB index remains the final duplicate guard.
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`whatsapp-account:${normalizedInput.accountId}`}))`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`whatsapp-phone:${normalizedInput.phone}`}))`;
 
     const account = await tx.whatsAppAccount.findUnique({
       where: { id: normalizedInput.accountId },
@@ -115,6 +117,33 @@ export async function queueWhatsAppMessage(input: QueueWhatsAppInput) {
         queued: false,
         reason: "form_already_submitted",
         sendAfterAt: null,
+      };
+    }
+
+    const completedQueueItem = await tx.whatsAppQueueItem.findFirst({
+      where: {
+        phone: normalizedInput.phone,
+        status: { in: [...COMPLETED_WHATSAPP_QUEUE_STATUSES] },
+        isArchived: false,
+        deletedAt: null,
+      },
+      orderBy: [{ sentAt: "desc" }, { queuedAt: "desc" }],
+      select: {
+        id: true,
+        whatsappLeadId: true,
+        formToken: true,
+        sentAt: true,
+      },
+    });
+
+    if (completedQueueItem) {
+      return {
+        whatsappLeadId: completedQueueItem.whatsappLeadId,
+        queueItemId: completedQueueItem.id,
+        callLeadId: callLead.id,
+        queued: false,
+        reason: "already_delivered",
+        sendAfterAt: completedQueueItem.sentAt,
       };
     }
 

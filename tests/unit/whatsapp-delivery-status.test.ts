@@ -19,4 +19,10 @@ describe("WhatsApp message delivery status", () => {
   it("treats an opened form as proof the link was received", () => {
     expect(getWhatsAppMessageDeliveryState("FAILED", "FAILED", true)).toBe("SENT");
   });
+
+  it("does not let a later failed retry erase an earlier successful send", () => {
+    expect(
+      getWhatsAppMessageDeliveryState(["FAILED", "OPENED"], "FAILED"),
+    ).toBe("SENT");
+  });
 });

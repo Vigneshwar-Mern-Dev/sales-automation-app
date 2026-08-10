@@ -7,6 +7,7 @@ import { WhatsAppConnectionStatus, WhatsAppLeadStatus } from "@/app/lib/prisma-e
 import { queueWhatsAppMessage } from "@/app/lib/whatsapp-lifecycle";
 import { evaluateWhatsAppRetry } from "@/app/lib/whatsapp-retry";
 import { pickWhatsAppAccount } from "@/app/lib/whatsapp-account-picker";
+import { hasCompletedWhatsAppDelivery } from "@/app/lib/whatsapp-delivery-status";
 
 function formString(formData: FormData, key: string) {
   return String(formData.get(key) ?? "").trim();
@@ -687,13 +688,20 @@ export async function bulkCleanupNonSubmittedLeadsAction(): Promise<BulkCleanupR
     return lead.status === WhatsAppLeadStatus.REPLIED || Boolean(lead.lastReplyAt);
   }
   function hasFailedState(lead: (typeof allLeads)[number]) {
+    if (hasCompletedWhatsAppDelivery(lead.queueItems.map((item) => item.status))) {
+      return false;
+    }
     return lead.status === WhatsAppLeadStatus.FAILED || lead.queueItems[0]?.status === "FAILED";
   }
   function hasActiveQueue(lead: (typeof allLeads)[number]) {
     return lead.queueItems.some((item) => ACTIVE_QUEUE.includes(item.status as (typeof ACTIVE_QUEUE)[number]));
   }
   function isAwaiting(lead: (typeof allLeads)[number]) {
-    return !hasSubmittedForm(lead) && !hasReply(lead) && !hasFailedState(lead) && !hasActiveQueue(lead) && lead.queueItems[0]?.status === "SENT";
+    return !hasSubmittedForm(lead) &&
+      !hasReply(lead) &&
+      !hasFailedState(lead) &&
+      !hasActiveQueue(lead) &&
+      hasCompletedWhatsAppDelivery(lead.queueItems.map((item) => item.status));
   }
 
   const result: BulkCleanupResult = {

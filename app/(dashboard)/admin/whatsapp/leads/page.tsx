@@ -5,6 +5,7 @@ import { db } from "@/app/lib/db";
 import { WhatsAppLeadStatus } from "@/app/lib/prisma-enums";
 import { getPublicCrmFormUrl, getPublicCrmUrl } from "@/app/lib/public-crm-url";
 import { evaluateWhatsAppRetry } from "@/app/lib/whatsapp-retry";
+import { hasCompletedWhatsAppDelivery } from "@/app/lib/whatsapp-delivery-status";
 import {
   buildWhatsAppQueueEstimates,
   type WhatsAppQueueEstimate,
@@ -50,6 +51,9 @@ function latestQueueItem(lead: ClassifiableLead) {
 }
 
 function hasFailedSendState(lead: ClassifiableLead) {
+  if (hasCompletedWhatsAppDelivery(lead.queueItems.map((item) => item.status))) {
+    return false;
+  }
   return lead.status === WhatsAppLeadStatus.FAILED || latestQueueItem(lead)?.status === "FAILED";
 }
 
@@ -205,7 +209,7 @@ export default async function AdminWhatsAppLeadsPage({ searchParams }: PageProps
       },
     }),
     db.whatsAppQueueItem.findMany({
-      where: { status: "SENT", sentAt: { gte: sentHistoryStart }, deletedAt: null },
+      where: { sentAt: { gte: sentHistoryStart }, deletedAt: null },
       select: { accountId: true, sentAt: true },
     }),
   ]);
@@ -287,6 +291,11 @@ export default async function AdminWhatsAppLeadsPage({ searchParams }: PageProps
           phone: true,
           status: true,
           formSubmittedAt: true,
+          queueItems: {
+            where: { deletedAt: null, isArchived: false },
+            orderBy: [{ queuedAt: "desc" }],
+            select: { status: true },
+          },
           formSubmissions: {
             where: { deletedAt: null },
             select: { status: true },
@@ -338,7 +347,11 @@ export default async function AdminWhatsAppLeadsPage({ searchParams }: PageProps
 
     return {
       ...callLead,
-      waStatus: waLead?.status ?? null,
+      waStatus: waLead
+        ? hasCompletedWhatsAppDelivery(waLead.queueItems.map((item) => item.status))
+          ? "SENT"
+          : waLead.status
+        : null,
       formStatus: waLead ? formLifecycleBucket(waLead) : null,
       waLeadId: waLead?.id ?? null,
       queuePosition: eta?.position ?? null,
@@ -377,7 +390,12 @@ export default async function AdminWhatsAppLeadsPage({ searchParams }: PageProps
       accountHealth={waAccounts.map((account) => ({
         id: account.id,
         label: account.label,
-        status: account.status,
+        status:
+          account.status === "CONNECTED" &&
+          (!account.lastHeartbeatAt ||
+            serverNow.getTime() - account.lastHeartbeatAt.getTime() > 5 * 60 * 1000)
+            ? "DISCONNECTED"
+            : account.status,
         autoReplyEnabled: account.autoReplyEnabled,
       }))}
       serverTime={serverTime}

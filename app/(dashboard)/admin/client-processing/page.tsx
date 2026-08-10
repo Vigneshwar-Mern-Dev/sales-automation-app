@@ -8,6 +8,10 @@ import {
   buildWhatsAppQueueEstimates,
   type WhatsAppQueueEstimate,
 } from "@/app/lib/whatsapp-queue-eta";
+import {
+  COMPLETED_WHATSAPP_QUEUE_STATUSES,
+  hasCompletedWhatsAppDelivery,
+} from "@/app/lib/whatsapp-delivery-status";
 
 type PageProps = {
   searchParams: Promise<{
@@ -75,7 +79,11 @@ export default async function AdminClientProcessingPage({ searchParams }: PagePr
       callLeadWhere.phone = { ...visiblePhoneFilter, in: activeQueueItems.map((item) => item.phone) };
     } else if (waStatus === "SENT") {
       const sentQueueItems = await db.whatsAppQueueItem.findMany({
-        where: { status: "SENT", deletedAt: null, isArchived: false },
+        where: {
+          status: { in: [...COMPLETED_WHATSAPP_QUEUE_STATUSES] },
+          deletedAt: null,
+          isArchived: false,
+        },
         select: { phone: true },
       });
       callLeadWhere.phone = { ...visiblePhoneFilter, in: sentQueueItems.map((item) => item.phone) };
@@ -162,7 +170,7 @@ export default async function AdminClientProcessingPage({ searchParams }: PagePr
       },
     }),
     db.whatsAppQueueItem.findMany({
-      where: { status: "SENT", sentAt: { gte: sentHistoryStart }, deletedAt: null },
+      where: { sentAt: { gte: sentHistoryStart }, deletedAt: null },
       select: { accountId: true, sentAt: true },
     }),
     // Get active agents
@@ -174,7 +182,13 @@ export default async function AdminClientProcessingPage({ searchParams }: PagePr
     // Stats
     db.callLead.count({ where: { phone: { not: { startsWith: "UNKNOWN-" } }, deletedAt: null, isArchived: false } }),
     db.whatsAppQueueItem.count({ where: { status: { in: ["QUEUED", "SENDING"] }, deletedAt: null, isArchived: false } }),
-    db.whatsAppQueueItem.count({ where: { status: "SENT", deletedAt: null, isArchived: false } }),
+    db.whatsAppQueueItem.count({
+      where: {
+        status: { in: [...COMPLETED_WHATSAPP_QUEUE_STATUSES] },
+        deletedAt: null,
+        isArchived: false,
+      },
+    }),
     db.whatsAppLead.count({ where: { OR: [{ status: WhatsAppLeadStatus.REPLIED }, { lastReplyAt: { not: null } }], deletedAt: null, isArchived: false } }),
     db.whatsAppLead.count({ where: { OR: [{ status: WhatsAppLeadStatus.FAILED }, { queueItems: { some: { status: "FAILED", deletedAt: null, isArchived: false } } }], deletedAt: null, isArchived: false } }),
   ]);
@@ -192,6 +206,11 @@ export default async function AdminClientProcessingPage({ searchParams }: PagePr
       lastReplySnippet: true,
       lastError: true,
       updatedAt: true,
+      queueItems: {
+        where: { deletedAt: null, isArchived: false },
+        orderBy: [{ queuedAt: "desc" }],
+        select: { status: true },
+      },
     },
   });
 
@@ -237,11 +256,18 @@ export default async function AdminClientProcessingPage({ searchParams }: PagePr
       createdAt: cl.createdAt,
       // WhatsApp related fields
       waLeadId: wa?.id ?? null,
-      waStatus: wa?.status ?? null,
+      waStatus: wa
+        ? hasCompletedWhatsAppDelivery(wa.queueItems.map((item) => item.status))
+          ? "SENT"
+          : wa.status
+        : null,
       waLastSentAt: wa?.lastSentAt ?? null,
       waLastReplyAt: wa?.lastReplyAt ?? null,
       waLastReplySnippet: wa?.lastReplySnippet ?? null,
-      waLastError: wa?.lastError ?? null,
+      waLastError:
+        wa && hasCompletedWhatsAppDelivery(wa.queueItems.map((item) => item.status))
+          ? null
+          : wa?.lastError ?? null,
       queuePosition: eta?.position ?? null,
       targetTime: eta?.earliestAt ?? null,
       eta,
@@ -264,7 +290,12 @@ export default async function AdminClientProcessingPage({ searchParams }: PagePr
       accountHealth={waAccounts.map((account) => ({
         id: account.id,
         label: account.label,
-        status: account.status,
+        status:
+          account.status === "CONNECTED" &&
+          (!account.lastHeartbeatAt ||
+            serverNow.getTime() - account.lastHeartbeatAt.getTime() > 5 * 60 * 1000)
+            ? "DISCONNECTED"
+            : account.status,
         autoReplyEnabled: account.autoReplyEnabled,
       }))}
       serverTime={serverTime}

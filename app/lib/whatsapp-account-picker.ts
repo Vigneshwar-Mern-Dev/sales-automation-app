@@ -81,14 +81,14 @@ function isAccountEligible(account: EligibleAccount): { eligible: boolean; reaso
   }
 
   // Check heartbeat freshness
-  if (account.lastHeartbeatAt) {
-    const stale = Date.now() - account.lastHeartbeatAt.getTime() > HEARTBEAT_STALE_MS;
-    if (stale) {
-      return { eligible: false, reason: "worker heartbeat stale" };
-    }
+  if (!account.lastHeartbeatAt) {
+    return { eligible: false, reason: "worker heartbeat missing" };
   }
-  // If lastHeartbeatAt is null, the worker may have just started — allow it
-  // since we already confirmed CONNECTED status above.
+  const stale = Date.now() - account.lastHeartbeatAt.getTime() > HEARTBEAT_STALE_MS;
+  if (stale) {
+    return { eligible: false, reason: "worker heartbeat stale" };
+  }
+  // Database status alone is not enough; only a fresh worker heartbeat is eligible.
 
   return { eligible: true, reason: "eligible" };
 }
@@ -153,7 +153,6 @@ export async function pickWhatsAppAccount(
         db.whatsAppQueueItem.count({
           where: {
             accountId: account.id,
-            status: "SENT",
             sentAt: { gte: todayStart },
             deletedAt: null,
           },
@@ -161,7 +160,6 @@ export async function pickWhatsAppAccount(
         db.whatsAppQueueItem.count({
           where: {
             accountId: account.id,
-            status: "SENT",
             sentAt: { gte: oneHourAgo },
             deletedAt: null,
           },

@@ -22,3 +22,29 @@ export function getProviderMessageId(sentMessage) {
     ? providerMessageId
     : null;
 }
+
+export function pickMappedWhatsAppId(mappings, phone) {
+  const expectedPhone = normalizeWhatsAppPhone(phone);
+  for (const mapping of Array.isArray(mappings) ? mappings : []) {
+    const mappedPhone = phoneFromWhatsAppId(mapping?.pn);
+    if (!mappedPhone || normalizeWhatsAppPhone(mappedPhone) !== expectedPhone) continue;
+
+    const lid = typeof mapping?.lid === "string" ? mapping.lid : null;
+    if (lid?.endsWith("@lid")) return lid;
+
+    const pn = typeof mapping?.pn === "string" ? mapping.pn : null;
+    if (pn?.endsWith("@c.us")) return pn;
+  }
+  return null;
+}
+
+export function findRecentOutgoingMessage(messages, body, notBeforeMs) {
+  const minimumTimestamp = Math.floor((notBeforeMs - 5000) / 1000);
+  return [...(Array.isArray(messages) ? messages : [])]
+    .reverse()
+    .find((message) =>
+      message?.fromMe === true &&
+      message?.body === body &&
+      Number(message?.timestamp || 0) >= minimumTimestamp,
+    ) ?? null;
+}

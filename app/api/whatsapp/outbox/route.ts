@@ -5,8 +5,22 @@ import { getPublicCrmFormUrl, getPublicCrmUrl } from "@/app/lib/public-crm-url";
 import { validateBody } from "@/app/lib/validators/validate";
 import { whatsappOutboxResultSchema } from "@/app/lib/validators/whatsapp";
 import { renderWhatsAppMessage } from "@/app/lib/whatsapp-message";
+import { COMPLETED_WHATSAPP_QUEUE_STATUSES } from "@/app/lib/whatsapp-delivery-status";
 
 const CLAIM_LEASE_MS = 5 * 60 * 1000;
+
+function completedQueueStatusToLeadStatus(status: string) {
+  switch (status) {
+    case "FORM_SUBMITTED":
+      return WhatsAppLeadStatus.FORM_SUBMITTED;
+    case "FORM_STARTED":
+      return WhatsAppLeadStatus.FORM_STARTED;
+    case "OPENED":
+      return WhatsAppLeadStatus.OPENED;
+    default:
+      return WhatsAppLeadStatus.SENT;
+  }
+}
 
 function unauthorized() {
   return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -169,7 +183,6 @@ export async function GET(request: Request) {
   const sentToday = await db.whatsAppQueueItem.count({
     where: {
       accountId: account.id,
-      status: "SENT",
       sentAt: { gte: since },
       deletedAt: null,
     },
@@ -186,7 +199,6 @@ export async function GET(request: Request) {
     db.whatsAppQueueItem.count({
       where: {
         accountId: account.id,
-        status: "SENT",
         sentAt: { gte: oneHourAgo },
         deletedAt: null,
       },
@@ -194,7 +206,6 @@ export async function GET(request: Request) {
     db.whatsAppQueueItem.findFirst({
       where: {
         accountId: account.id,
-        status: "SENT",
         sentAt: { not: null },
         deletedAt: null,
       },
@@ -245,7 +256,6 @@ export async function GET(request: Request) {
     const latestCommittedSend = await tx.whatsAppQueueItem.findFirst({
       where: {
         accountId: account.id,
-        status: "SENT",
         sentAt: { not: null },
         deletedAt: null,
       },
@@ -282,6 +292,35 @@ export async function GET(request: Request) {
     });
 
     if (!candidate) return null;
+
+    const previousDelivery = await tx.whatsAppQueueItem.findFirst({
+      where: {
+        id: { not: candidate.id },
+        phone: candidate.phone,
+        status: { in: [...COMPLETED_WHATSAPP_QUEUE_STATUSES] },
+        deletedAt: null,
+        isArchived: false,
+      },
+      select: { id: true },
+    });
+
+    if (previousDelivery) {
+      await tx.whatsAppQueueItem.updateMany({
+        where: {
+          phone: candidate.phone,
+          status: { in: ["QUEUED", "SENDING"] },
+          deletedAt: null,
+          isArchived: false,
+        },
+        data: {
+          status: "CANCELLED",
+          cancelledAt: claimNow,
+          claimExpiresAt: null,
+          lastError: "Cancelled because an earlier message was already delivered.",
+        },
+      });
+      return null;
+    }
 
     const claimed = await tx.whatsAppQueueItem.updateMany({
       where: {
@@ -397,6 +436,7 @@ export async function POST(request: Request) {
       callLeadId: true,
       accountId: true,
       status: true,
+      phone: true,
     },
   });
 
@@ -405,7 +445,9 @@ export async function POST(request: Request) {
   }
 
   if (payload.ok) {
-    if (queueItem.status === "SENT") {
+    if (COMPLETED_WHATSAPP_QUEUE_STATUSES.includes(
+      queueItem.status as (typeof COMPLETED_WHATSAPP_QUEUE_STATUSES)[number],
+    )) {
       return NextResponse.json({ ok: true, idempotent: true });
     }
 
@@ -472,7 +514,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: true, idempotent: true });
     }
 
-    if (queueItem.status === "SENT") {
+    if (COMPLETED_WHATSAPP_QUEUE_STATUSES.includes(
+      queueItem.status as (typeof COMPLETED_WHATSAPP_QUEUE_STATUSES)[number],
+    )) {
       return NextResponse.json({ ok: true, idempotent: true, ignoredLateFailure: true });
     }
 
@@ -491,11 +535,26 @@ export async function POST(request: Request) {
         return false;
       }
 
+      const previousDelivery = await tx.whatsAppQueueItem.findFirst({
+        where: {
+          id: { not: queueItem.id },
+          whatsappLeadId: queueItem.whatsappLeadId,
+          status: { in: [...COMPLETED_WHATSAPP_QUEUE_STATUSES] },
+          deletedAt: null,
+          isArchived: false,
+        },
+        orderBy: [{ formSubmittedAt: "desc" }, { openedAt: "desc" }, { sentAt: "desc" }],
+        select: { status: true, sentAt: true },
+      });
+
       await tx.whatsAppLead.update({
         where: { id: queueItem.whatsappLeadId },
         data: {
-          status: WhatsAppLeadStatus.FAILED,
-          lastError,
+          status: previousDelivery
+            ? completedQueueStatusToLeadStatus(previousDelivery.status)
+            : WhatsAppLeadStatus.FAILED,
+          lastError: previousDelivery ? null : lastError,
+          lastSentAt: previousDelivery?.sentAt ?? undefined,
         },
       });
 

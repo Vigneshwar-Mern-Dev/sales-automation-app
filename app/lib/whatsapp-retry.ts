@@ -1,9 +1,12 @@
+import { hasCompletedWhatsAppDelivery } from "./whatsapp-delivery-status";
+
 const ACTIVE_QUEUE_STATUSES = new Set(["QUEUED", "SENDING"]);
 const NON_RETRYABLE_LEAD_STATUSES = new Set([
   "SENT",
   "QUEUED",
   "SENDING",
   "FORM_SUBMITTED",
+  "REPLIED",
   "DO_NOT_CONTACT",
   "CANCELLED",
 ]);
@@ -41,6 +44,9 @@ export function evaluateWhatsAppRetry(candidate: RetryCandidate): RetryEligibili
   const latestQueueItem = candidate.queueItems[0] ?? null;
   const hasSubmittedForm = candidate.formSubmissions.some((submission) => submission.status === "FORM_SUBMITTED");
   const hasActiveQueueItem = candidate.queueItems.some((item) => ACTIVE_QUEUE_STATUSES.has(item.status));
+  const hasCompletedDelivery = hasCompletedWhatsAppDelivery(
+    candidate.queueItems.map((item) => item.status),
+  );
   const hasFailedSendState = candidate.status === "FAILED" || latestQueueItem?.status === "FAILED";
   const hasNonRetryableNumberFailure =
     isNonRetryableNumberFailure(candidate.lastError) ||
@@ -60,6 +66,10 @@ export function evaluateWhatsAppRetry(candidate: RetryCandidate): RetryEligibili
 
   if (hasActiveQueueItem) {
     reasons.push("Active QUEUED/SENDING queue item exists");
+  }
+
+  if (hasCompletedDelivery) {
+    reasons.push("Message was already delivered");
   }
 
   if (hasNonRetryableNumberFailure) {

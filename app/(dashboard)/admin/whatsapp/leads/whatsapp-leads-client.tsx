@@ -199,7 +199,7 @@ function leadMessageDelivery(lead: Lead) {
     lead.formSubmission?.status === "FORM_STARTED";
   return messageDeliveryPresentation(
     getWhatsAppMessageDeliveryState(
-      lead.latestQueueItem?.status,
+      lead.queueItems.map((item) => item.status),
       lead.status,
       formWasOpenedOrSubmitted,
     ),
