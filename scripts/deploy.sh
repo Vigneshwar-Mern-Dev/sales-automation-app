@@ -8,6 +8,7 @@ set -euo pipefail
 #   bash scripts/deploy.sh                    # full deploy
 #   bash scripts/deploy.sh --skip-tests       # skip tests (use with caution)
 #   bash scripts/deploy.sh --tarball-only     # create tarball without uploading
+#   DEPLOY_SSH_AUTH=password bash scripts/deploy.sh --skip-tests
 #
 # Requirements:
 #   - ssh/scp access to the server
@@ -23,6 +24,7 @@ SERVER_HOST="138.252.201.176"
 SERVER_DIR="/home/planlecrm/htdocs/crm.planle.com"
 PUBLIC_CRM_URL="https://crm.planle.com"
 SSH_KEY="${APP_DIR}/../aws-key.pem"
+SSH_AUTH_MODE="${DEPLOY_SSH_AUTH:-key}"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 TARBALL_NAME="crm-deploy-${TIMESTAMP}.tar.gz"
 
@@ -87,7 +89,12 @@ fi
 echo ""
 echo "▶ Step 4: Uploading to server..."
 
-if [[ ! -f "$SSH_KEY" ]]; then
+if [[ "$SSH_AUTH_MODE" != "key" && "$SSH_AUTH_MODE" != "password" ]]; then
+  echo "DEPLOY_SSH_AUTH must be either key or password." >&2
+  exit 1
+fi
+
+if [[ "$SSH_AUTH_MODE" == "key" && ! -f "$SSH_KEY" ]]; then
   echo "⚠ SSH key not found at ${SSH_KEY}"
   echo "  Upload manually:"
   echo "    scp -i <key> ${TARBALL_PATH} ${SERVER_USER}@${SERVER_HOST}:/tmp/${TARBALL_NAME}"
@@ -103,8 +110,15 @@ if [[ ! -f "$SSH_KEY" ]]; then
   exit 0
 fi
 
-chmod 600 "$SSH_KEY"
-scp -i "$SSH_KEY" -o StrictHostKeyChecking=no \
+SSH_ARGS=(-o StrictHostKeyChecking=no)
+if [[ "$SSH_AUTH_MODE" == "key" ]]; then
+  chmod 600 "$SSH_KEY"
+  SSH_ARGS=(-i "$SSH_KEY" "${SSH_ARGS[@]}")
+else
+  echo "Password authentication selected. Enter the CloudPanel site-user password when prompted."
+fi
+
+scp "${SSH_ARGS[@]}" \
   "$TARBALL_PATH" "${SERVER_USER}@${SERVER_HOST}:/tmp/${TARBALL_NAME}"
 echo "✓ Uploaded to server."
 
@@ -113,7 +127,7 @@ echo "✓ Uploaded to server."
 echo ""
 echo "▶ Step 5: Deploying on server..."
 
-ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no \
+ssh "${SSH_ARGS[@]}" \
   "${SERVER_USER}@${SERVER_HOST}" << REMOTE_SCRIPT
 set -euo pipefail
 cd "${SERVER_DIR}"
